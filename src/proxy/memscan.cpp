@@ -183,8 +183,10 @@ static LONG CALLBACK watch_handler(EXCEPTION_POINTERS* ep) {
         }
         float v = 0;
         memcpy(&v, reinterpret_cast<void*>(g_watch_addr.load()), 4);
-        logf("watch %08x = %g by exe+%x (tid %lu) stack:%s", unsigned(g_watch_addr.load()), v,
-             unsigned(c->Eip - g_exe_lo), GetCurrentThreadId(), chain.c_str());
+        logf("watch %08x = %g by exe+%x (tid %lu) eax=%08lx ecx=%08lx edx=%08lx ebx=%08lx esi=%08lx edi=%08lx "
+             "ebp=%08lx stack:%s",
+             unsigned(g_watch_addr.load()), v, unsigned(c->Eip - g_exe_lo), GetCurrentThreadId(), c->Eax, c->Ecx,
+             c->Edx, c->Ebx, c->Esi, c->Edi, c->Ebp, chain.c_str());
     }
     if (left <= 0) c->Dr7 &= ~uintptr_t(3);  // disarm on this thread
     return EXCEPTION_CONTINUE_EXECUTION;
@@ -258,6 +260,27 @@ void mem_patch(uintptr_t addr, const std::vector<uint8_t>& bytes) {
     VirtualProtect(reinterpret_cast<void*>(addr), bytes.size(), old, &old);
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(addr), bytes.size());
     logf("patch %08x: %zu bytes (was %s)", unsigned(addr), bytes.size(), was.c_str());
+}
+
+// dumpf ADDR COUNT [TAG]: log COUNT floats from ADDR, 8 per line as "dump TAG +off: v v v ...".
+void mem_dumpf(uintptr_t addr, int count, const std::string& tag) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) {
+        logf("dumpf %08x: not mapped", unsigned(addr));
+        return;
+    }
+    const uintptr_t end = uintptr_t(mbi.BaseAddress) + mbi.RegionSize;
+    for (int i = 0; i < count; i += 8) {
+        std::string line;
+        char buf[24];
+        for (int j = i; j < i + 8 && j < count && addr + 4 * j + 4 <= end; ++j) {
+            float v;
+            memcpy(&v, reinterpret_cast<void*>(addr + 4 * j), 4);
+            snprintf(buf, sizeof(buf), " %.6g", v);
+            line += buf;
+        }
+        logf("dump %s +%03x:%s", tag.c_str(), unsigned(i * 4), line.c_str());
+    }
 }
 
 void mem_pokehits(float value) {

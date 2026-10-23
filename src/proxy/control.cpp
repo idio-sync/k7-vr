@@ -6,6 +6,8 @@
 //   view YAW PITCH          free look from the game camera, degrees (+yaw right, +pitch up)
 //   pair                    PNGs of the next two frames, named by eye (pair_NNN_L/R.png)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
+//   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
+//   dumpf ADDR N [TAG] / dumpptr PTR OFF N TAG   log N floats (memscan.cpp)
 //   holdkey NAME ms         hold a key
 //   click [ms] / rclick [ms] left / right mouse button through raw input
 //   look dx dy [steps] [ms] relative mouse motion: `steps` moves of (dx,dy) spread over ms
@@ -197,6 +199,26 @@ static void run_line(const std::string& line) {
         ss >> lo >> hi;
         bool rescan = cmd == "rescanf";
         g_steps.push_back(Step{.action = [=] { (rescan ? mem_rescanf : mem_scanf)(lo, hi); }});
+    } else if (cmd == "dumpf") {
+        std::string addr, tag;
+        int count = 64;
+        ss >> addr >> count >> tag;
+        uintptr_t a = parse_addr(addr);
+        g_steps.push_back(Step{.action = [=] { mem_dumpf(a, count, tag.empty() ? addr : tag); }});
+    } else if (cmd == "dumpptr") {
+        // dumpptr PTR OFF COUNT TAG: dump COUNT floats at *(PTR) + OFF (hex), resolved when the step runs
+        std::string addr, tag;
+        unsigned offset = 0;
+        int count = 64;
+        ss >> addr >> std::hex >> offset >> std::dec >> count >> tag;
+        uintptr_t a = parse_addr(addr);
+        g_steps.push_back(Step{.action = [=] { mem_dumpf(*reinterpret_cast<uintptr_t*>(a) + offset, count, tag); }});
+    } else if (cmd == "keydown" || cmd == "keyup") {
+        std::string name;
+        ss >> name;
+        UINT vk = parse_key(name);
+        bool down = cmd == "keydown";
+        g_steps.push_back(Step{.action = [=] { post_key(vk, down); }});
     } else if (cmd == "patch") {
         std::string addr, hex;
         ss >> addr >> hex;

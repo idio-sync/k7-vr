@@ -8,8 +8,9 @@ motion-controller-aimed gun in first-person aim mode.
 
 **Go.** Stereo rendering is easy here and proven in-game. Culling, the main risk, has a working
 fix (FOV inflation through a code patch, framing restored in the shader). Remaining known
-problems are view-dependent effect cards, empty space behind some fixed cameras, and finding
-the aim variables for controller aiming. The gun in aim mode is an ordinary eye-space model.
+problems are view-dependent effect cards and empty space behind some fixed cameras. The aim
+angles are found and writable (controller aiming), and the gun in aim mode is an ordinary
+eye-space model.
 
 ## What the port is
 
@@ -100,6 +101,28 @@ after the clear, with the character pixel shader and the same projection as the 
 ~2–7 units in front of the camera. The gun is an ordinary eye-space model, so moving it to a
 controller is an extra transform on those draws in the patched vertex shader.
 
+**Aim state (controller aiming lead, verified by writing it).** Aim mode is driven by a global
+aim controller at RVA `0x46bde8` (VA `0x86bde8`); `1b3a0f`–`1b3b3c` turns it into the camera:
+
+| offset | meaning |
+|---|---|
+| `+0xc4` / `+0xc8` | aim pitch / yaw, radians (`+0xd0`/`+0xd4` hold a second copy) |
+| `+0xdc`..`+0xe4` | eye position (copied to camera manager `+0x0c`) |
+| `+0xf4`..`+0xfc` | look-at target = eye + direction·100 (to manager `+0x24`) |
+| `+0x108` | aim FOV (44°; copied to the manager and source camera) |
+| `+0x10c` | camera manager pointer |
+| `+0x150` / `+0x154` | aim velocities, decayed into pitch / yaw each frame (`1b3b40`) |
+| `+0x160` | reference yaw; yaw is wrapped to ±π around it |
+
+Writing pitch/yaw (both copies) during aim mode turns the view and reticle; the game clamps
+them (pitch −0.35 settled at −0.25; yaw 3.6 came back as −2.82). There is a small automatic
+drift (sway). So controller aim = write these each frame from the controller direction
+relative to the body, within the game's limits, and zero the velocities. Because the aim-mode
+camera follows the aim, the VR head transform must be relative to the game camera's rotation
+(world-locked head), and the gun, being attached to the game camera, already points along the
+aim; only its position needs moving to the hand. Not verified yet: that shots go along this aim.
+Keyboard aim in aim mode is the arrow keys.
+
 **Units:** the held gun sits ~2.5 units in front of the eye, so a unit is roughly 20–30 cm,
 which matches the stereo parallax measurements. IPD in game units ≈ 0.2–0.3 (calibrate).
 
@@ -124,9 +147,8 @@ which matches the stereo parallax measurements. IPD in game units ≈ 0.2–0.3 
 
 ## Next steps (proposed)
 
-1. Find where the aim direction lives (camera/aim angles in aim mode), for controller aiming,
-   and how to tag the gun/hand draws reliably (first character-shader draws after the clear in
-   aim mode is the current lead).
+1. Aim angles found (above). Still to do: confirm shots follow them, and tag the gun/hand
+   draws reliably (first character-shader draws after the clear in aim mode is the lead).
 2. Decide how to treat the effect cards (`d358d9e91e34870e` quads) and empty directions.
 3. Calibrate units/IPD (e.g. from a character's height).
 4. Then the real design doc: OpenVR output, per-eye post chain, HUD panel, aim mapping.

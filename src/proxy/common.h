@@ -41,6 +41,7 @@ void mem_scanpair(float a, float b, float tol, int window);
 void mem_watch(uintptr_t addr, int hits);
 void mem_watchhit(size_t index, int hits);
 void mem_patch(uintptr_t addr, const std::vector<uint8_t>& bytes);
+void mem_dumpf(uintptr_t addr, int count, const std::string& tag);
 void scan_projection();  // hooks_d3d.cpp
 
 // FOV inflation (fov_inflate.cpp): the game culls with a wider FOV; shaders restore framing.
