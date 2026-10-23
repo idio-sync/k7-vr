@@ -4,6 +4,8 @@
 //   shot                    PNG of the next frame
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   holdkey NAME ms         hold a key
+//   click [ms] / rclick [ms] left / right mouse button through raw input
+//   look dx dy [steps] [ms] relative mouse motion: `steps` moves of (dx,dy) spread over ms
 //   press A[+B...] [ms]     tap pad buttons (default 120 ms), then release for 120 ms
 //   hold A[+B...] ms        hold pad buttons
 //   stick lx ly ms          left stick, -1..1
@@ -11,6 +13,7 @@
 //   trig l r ms             triggers, 0..1
 //   wait ms                 idle
 //   activate                tell the game its window is active (it ignores input otherwise)
+//   mouse x y               where the game sees the cursor, in window client pixels (default: off-window)
 //   log text                marker in k7vr.log
 // Steps (all but log/activate) run in order, each for its duration; shot/capture take no time. Pad input is ORed into player 1's pad; keys
 // are posted to the game window as WM_INPUT (see hooks_input.cpp), so it needn't have focus.
@@ -32,6 +35,8 @@ struct Step {
     SHORT lx = 0, ly = 0, rx = 0, ry = 0;
     BYTE lt = 0, rt = 0;
     UINT vk = 0;
+    int mouse = 0;  // 1 left, 2 right button
+    LONG dx = 0, dy = 0;  // relative mouse motion, posted when the step starts
     DWORD ms = 0;
     bool shot = false;
     bool capture = false;
@@ -117,6 +122,18 @@ static void run_line(const std::string& line) {
         s.ms = ms;
         g_steps.push_back(s);
         if (cmd == "key") g_steps.push_back(Step{.ms = 120});
+    } else if (cmd == "click" || cmd == "rclick") {
+        DWORD ms = 120;
+        ss >> ms;
+        g_steps.push_back(Step{.mouse = cmd == "click" ? 1 : 2, .ms = ms});
+        g_steps.push_back(Step{.ms = 120});
+    } else if (cmd == "look") {
+        LONG dx = 0, dy = 0;
+        int steps = 1;
+        DWORD ms = 0;
+        ss >> dx >> dy >> steps >> ms;
+        if (steps < 1) steps = 1;
+        for (int i = 0; i < steps; ++i) g_steps.push_back(Step{.dx = dx, .dy = dy, .ms = ms / DWORD(steps)});
     } else if (cmd == "press" || cmd == "hold") {
         std::string buttons;
         DWORD ms = 120;
@@ -150,6 +167,10 @@ static void run_line(const std::string& line) {
         g_steps.push_back(Step{.ms = ms});
     } else if (cmd == "activate") {
         post_activate();
+    } else if (cmd == "mouse") {
+        int x = 0, y = 0;
+        ss >> x >> y;
+        set_fake_cursor(x, y);
     } else if (cmd == "log") {
         std::string rest;
         std::getline(ss, rest);
@@ -167,6 +188,7 @@ static void advance_locked() {
     ULONGLONG now = GetTickCount64();
     if (g_running && now >= g_cur_end) {
         if (g_cur.vk) post_key(g_cur.vk, false);
+        if (g_cur.mouse) post_mouse(g_cur.mouse == 1 ? RI_MOUSE_LEFT_BUTTON_UP : RI_MOUSE_RIGHT_BUTTON_UP, 0, 0);
         g_running = false;
         g_cur = Step{};
         ++g_seq;
@@ -178,6 +200,8 @@ static void advance_locked() {
         g_running = true;
         ++g_seq;
         if (g_cur.vk) post_key(g_cur.vk, true);
+        if (g_cur.mouse) post_mouse(g_cur.mouse == 1 ? RI_MOUSE_LEFT_BUTTON_DOWN : RI_MOUSE_RIGHT_BUTTON_DOWN, 0, 0);
+        if (g_cur.dx || g_cur.dy) post_mouse(0, g_cur.dx, g_cur.dy);
         g_pending.shot |= g_cur.shot;
         g_pending.capture |= g_cur.capture;
     }

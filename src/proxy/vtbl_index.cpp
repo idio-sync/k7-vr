@@ -34,6 +34,7 @@ const int ctx_CopyResource = SLOT(ID3D11DeviceContext, CopyResource);
 const int ctx_UpdateSubresource = SLOT(ID3D11DeviceContext, UpdateSubresource);
 
 const int sc_Present = SLOT(IDXGISwapChain, Present);
+const int sc_ResizeBuffers = SLOT(IDXGISwapChain, ResizeBuffers);
 const int sc1_Present1 = SLOT(IDXGISwapChain1, Present1);
 
 }  // namespace k7::vt

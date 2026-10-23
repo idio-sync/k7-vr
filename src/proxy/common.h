@@ -26,6 +26,8 @@ bool patch_vtbl(void* object, int index, void* hook, void** orig);
 void install_d3d_hooks();
 void install_compile_hook();
 void install_folder_hook();
+void install_file_hooks();
+void start_audio_mute();
 
 // DXBC checksum (first 8 bytes of the container's MD5), used to name shaders.
 uint64_t dxbc_hash(const void* bytecode, size_t size);
@@ -46,5 +48,8 @@ void install_input_hook();
 void set_game_window(HWND hwnd);
 void post_key(UINT vk, bool down);
 void post_activate();
+void post_mouse(USHORT ri_button_flags, LONG dx, LONG dy);
+void set_fake_cursor(int x, int y);  // window client coordinates
+bool restored_client_size(HWND hwnd, LONG* w, LONG* h);  // false unless hwnd is the minimized game window
 
 }  // namespace k7

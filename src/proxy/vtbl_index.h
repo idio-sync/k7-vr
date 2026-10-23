@@ -24,6 +24,7 @@ extern const int ctx_CopyResource;
 extern const int ctx_UpdateSubresource;
 
 extern const int sc_Present;
+extern const int sc_ResizeBuffers;
 extern const int sc1_Present1;
 
 }  // namespace k7::vt

@@ -18,15 +18,15 @@ $k7 = Join-Path $Game 'k7vr'
 $profileDir = Join-Path $k7 'SavedGames\killer7'
 New-Item -ItemType Directory -Force $profileDir | Out-Null
 
-# Private killer7.ini: the user's own bindings, but windowed and silent.
+# Private killer7.ini: the user's own bindings and volumes, but windowed. (The probe mutes
+# the process's audio session instead of zeroing volumes, which may stall movie playback.)
 $ini = Join-Path $profileDir 'killer7.ini'
 if (-not (Test-Path $ini)) {
     $src = Join-Path $env:USERPROFILE 'Saved Games\killer7\killer7.ini'
     $lines = Get-Content $src
     $lines = $lines -replace '^EnableFullScreen = .*', 'EnableFullScreen = false' `
                     -replace '^WindowSize = .*', 'WindowSize = 1280,720' `
-                    -replace '^WindowPos = .*', 'WindowPos = 80,80' `
-                    -replace '^(SoundVolume|CutsceneVolume|MusicVolume) = .*', '$1 = 0.0'
+                    -replace '^WindowPos = .*', 'WindowPos = 80,80'
     [IO.File]::WriteAllLines($ini, $lines, [Text.Encoding]::ASCII)
     Write-Output "seeded $ini"
 }

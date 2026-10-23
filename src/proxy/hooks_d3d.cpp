@@ -590,6 +590,23 @@ static HRESULT STDMETHODCALLTYPE hk_Present1(IDXGISwapChain1* sc, UINT sync, UIN
     return o_Present1(sc, sync, flags, params);
 }
 
+// Minimized, the game resizes the swap chain to the empty client area (8x8); keep the
+// restored size instead so the frame and anything derived from it stay normal.
+using ResizeBuffers_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+static ResizeBuffers_t o_ResizeBuffers;
+static HRESULT STDMETHODCALLTYPE hk_ResizeBuffers(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt,
+                                                  UINT flags) {
+    DXGI_SWAP_CHAIN_DESC d{};
+    sc->GetDesc(&d);
+    LONG rw, rh;
+    if (restored_client_size(d.OutputWindow, &rw, &rh)) {
+        logf("ResizeBuffers %ux%u while minimized -> %ldx%ld", w, h, rw, rh);
+        w = UINT(rw);
+        h = UINT(rh);
+    }
+    return o_ResizeBuffers(sc, count, w, h, fmt, flags);
+}
+
 // A throwaway swap chain on the game's device gives us the swap chain vtable to patch.
 static void hook_swapchain(ID3D11Device* dev) {
     IDXGIDevice* dxdev = nullptr;
@@ -612,6 +629,8 @@ static void hook_swapchain(ID3D11Device* dev) {
         IDXGISwapChain* sc = nullptr;
         if (SUCCEEDED(factory->CreateSwapChain(dev, &d, &sc))) {
             patch_vtbl(sc, vt::sc_Present, reinterpret_cast<void*>(&hk_Present), reinterpret_cast<void**>(&o_Present));
+            patch_vtbl(sc, vt::sc_ResizeBuffers, reinterpret_cast<void*>(&hk_ResizeBuffers),
+                       reinterpret_cast<void**>(&o_ResizeBuffers));
             IDXGISwapChain1* sc1 = nullptr;
             if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc1)))) {
                 patch_vtbl(sc1, vt::sc1_Present1, reinterpret_cast<void*>(&hk_Present1),

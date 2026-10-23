@@ -1,0 +1,32 @@
+# From a fresh boot to Garcian at the start of Target 00: Angel, Normal.
+# Language select shows on every boot; then the content warning, logos (let them play), title.
+wait 12000
+log script new_game
+key SPACE
+wait 3000
+key SPACE
+wait 14000
+shot
+key SPACE
+wait 2500
+key W
+key W
+key W
+key W
+shot
+key SPACE
+wait 2500
+key SPACE
+wait 6000
+key SPACE
+wait 8000
+# One spare: it advances the Angel card if a press got eaten during boot, and is ignored
+# by the aiming tutorial (put the laser dot on Garcian's silhouette and fire). The dot
+# starts on his chest. Fire needs `fire = KEY_J` in the test profile's [KeyboardAndMouse]:
+# injected mouse buttons don't register (mouse motion does).
+key SPACE
+wait 8000
+shot
+key J
+wait 3000
+shot

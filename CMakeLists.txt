@@ -20,6 +20,8 @@ add_library(k7vr SHARED
     src/proxy/hooks_compile.cpp
     src/proxy/hooks_folder.cpp
     src/proxy/hooks_input.cpp
+    src/proxy/hooks_files.cpp
+    src/proxy/audio_mute.cpp
     src/proxy/png.cpp
     src/proxy/control.cpp
     src/proxy/xinput.cpp)

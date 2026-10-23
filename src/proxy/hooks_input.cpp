@@ -24,7 +24,6 @@ static GetRawInputData_t o_GetRawInputData;
 static UINT WINAPI hk_GetRawInputData(HRAWINPUT handle, UINT command, LPVOID data, PUINT size, UINT header_size) {
     UINT_PTR h = reinterpret_cast<UINT_PTR>(handle);
     if ((h & 0xFFFF0000) == kMarker) {
-        logf("GetRawInputData(marker %x, cmd %x, data %p)", unsigned(h), command, data);
         std::lock_guard lock(g_mx);
         auto it = g_fake.find(h);
         if (it == g_fake.end() || !size) return UINT(-1);
@@ -86,6 +85,50 @@ void post_key(UINT vk, bool down) {
          GetForegroundWindow());
 }
 
+static HANDLE g_mouse;
+
+// Mouse buttons and motion through the same WM_INPUT path. flags are RI_MOUSE_* button flags.
+void post_mouse(USHORT flags, LONG dx, LONG dy) {
+    HWND hwnd = g_hwnd.load();
+    if (!hwnd) return;
+    if (!g_mouse) {
+        UINT n = 0;
+        GetRawInputDeviceList(nullptr, &n, sizeof(RAWINPUTDEVICELIST));
+        if (n) {
+            auto list = new RAWINPUTDEVICELIST[n];
+            n = GetRawInputDeviceList(list, &n, sizeof(RAWINPUTDEVICELIST));
+            for (UINT i = 0; i < n && n != UINT(-1); ++i)
+                if (list[i].dwType == RIM_TYPEMOUSE) {
+                    g_mouse = list[i].hDevice;
+                    break;
+                }
+            delete[] list;
+        }
+    }
+    RAWINPUT ri{};
+    ri.header.dwType = RIM_TYPEMOUSE;
+    ri.header.dwSize = sizeof(RAWINPUTHEADER) + sizeof(RAWMOUSE);
+    ri.header.hDevice = g_mouse;
+    ri.data.mouse.usFlags = MOUSE_MOVE_RELATIVE;
+    ri.data.mouse.usButtonFlags = flags;
+    ri.data.mouse.lLastX = dx;
+    ri.data.mouse.lLastY = dy;
+    UINT_PTR h;
+    {
+        std::lock_guard lock(g_mx);
+        h = kMarker | (g_next++ & 0xFFFF);
+        g_fake[h] = ri;
+    }
+    PostMessageW(hwnd, WM_INPUT, RIM_INPUT, LPARAM(h));
+
+    // Buttons also as window messages, in case the game reads those instead of raw input.
+    const LPARAM at = MAKELPARAM(640, 360);
+    if (flags & RI_MOUSE_LEFT_BUTTON_DOWN) PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, at);
+    if (flags & RI_MOUSE_LEFT_BUTTON_UP) PostMessageW(hwnd, WM_LBUTTONUP, 0, at);
+    if (flags & RI_MOUSE_RIGHT_BUTTON_DOWN) PostMessageW(hwnd, WM_RBUTTONDOWN, MK_RBUTTON, at);
+    if (flags & RI_MOUSE_RIGHT_BUTTON_UP) PostMessageW(hwnd, WM_RBUTTONUP, 0, at);
+}
+
 // Tells the game it is the active window, so it acts on scripted input while in the background.
 void post_activate() {
     HWND hwnd = g_hwnd.load();
@@ -94,6 +137,52 @@ void post_activate() {
     PostMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0);
     PostMessageW(hwnd, WM_SETFOCUS, 0, 0);
     logf("posted activation to %p", hwnd);
+}
+
+// The game hovers menu items under the real mouse cursor, so the probe reports its own cursor:
+// parked far off the window unless a `mouse x y` command places it (window client coordinates).
+static std::atomic<bool> g_cursor_set;
+static std::atomic<LONG> g_cursor_x, g_cursor_y;
+
+void set_fake_cursor(int x, int y) {
+    g_cursor_x = x;
+    g_cursor_y = y;
+    g_cursor_set = true;
+}
+
+// Defined in client coordinates of the window's *current* position, so the game's own
+// ScreenToClient gets back exactly what was set, minimized (at -32000,-32000) or not.
+static BOOL WINAPI hk_GetCursorPos(POINT* p) {
+    if (!p) return FALSE;
+    POINT pt{-1000, -1000};  // parked above-left of the window
+    if (g_cursor_set) pt = {g_cursor_x, g_cursor_y};
+    if (HWND hwnd = g_hwnd.load()) ClientToScreen(hwnd, &pt);
+    *p = pt;
+    return TRUE;
+}
+
+// A minimized window has an empty client rect; report the restored size so the game's
+// cursor-to-screen mapping (and anything sized from the client area) keeps working.
+bool restored_client_size(HWND hwnd, LONG* w, LONG* h) {
+    if (!hwnd || hwnd != g_hwnd.load() || !IsIconic(hwnd)) return false;
+    WINDOWPLACEMENT wp{sizeof(wp)};
+    if (!GetWindowPlacement(hwnd, &wp)) return false;
+    RECT frame{0, 0, 0, 0};
+    AdjustWindowRectEx(&frame, DWORD(GetWindowLongW(hwnd, GWL_STYLE)), FALSE, DWORD(GetWindowLongW(hwnd, GWL_EXSTYLE)));
+    *w = (wp.rcNormalPosition.right - wp.rcNormalPosition.left) - (frame.right - frame.left);
+    *h = (wp.rcNormalPosition.bottom - wp.rcNormalPosition.top) - (frame.bottom - frame.top);
+    return *w > 0 && *h > 0;
+}
+
+using GetClientRect_t = BOOL(WINAPI*)(HWND, LPRECT);
+static GetClientRect_t o_GetClientRect;
+static BOOL WINAPI hk_GetClientRect(HWND hwnd, LPRECT r) {
+    LONG w, h;
+    if (r && restored_client_size(hwnd, &w, &h)) {
+        *r = {0, 0, w, h};
+        return TRUE;
+    }
+    return o_GetClientRect(hwnd, r);
 }
 
 // While probing, the game must not grab the desktop: no cursor clipping or warping, no focus stealing.
@@ -121,10 +210,14 @@ void install_input_hook() {
         patch_import(exe, "USER32.dll", "SetForegroundWindow", reinterpret_cast<void*>(&hk_SetForegroundWindow),
                      &unused);
         patch_import(exe, "USER32.dll", "SetFocus", reinterpret_cast<void*>(&hk_SetFocus), &unused);
+        patch_import(exe, "USER32.dll", "GetCursorPos", reinterpret_cast<void*>(&hk_GetCursorPos), &unused);
     }
-    if (GetPrivateProfileIntW(L"probe", L"minimized", 1, path_in(L"k7vr.ini").c_str()))
+    if (GetPrivateProfileIntW(L"probe", L"minimized", 1, path_in(L"k7vr.ini").c_str())) {
         patch_import(exe, "USER32.dll", "ShowWindow", reinterpret_cast<void*>(&hk_ShowWindow),
                      reinterpret_cast<void**>(&o_ShowWindow));
+        patch_import(exe, "USER32.dll", "GetClientRect", reinterpret_cast<void*>(&hk_GetClientRect),
+                     reinterpret_cast<void**>(&o_GetClientRect));
+    }
 }
 
 }  // namespace k7

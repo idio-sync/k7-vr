@@ -1,0 +1,10 @@
+# From a fresh boot to the title menu (NEW GAME / CONTINUE / OPTIONS / EXIT). Stops there.
+wait 12000
+log script to_menu
+key SPACE
+wait 3000
+key SPACE
+wait 6000
+key SPACE
+wait 2500
+shot
