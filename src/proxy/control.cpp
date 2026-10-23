@@ -2,6 +2,8 @@
 // the next frame boundary. One command per line:
 //   capture                 next frame's draw list + PNG (also F10)
 //   shot                    PNG of the next frame
+//   stereo SEP              alternate eyes every frame, SEP apart in GX eye-space units (0 = off)
+//   pair                    PNGs of the next two frames, named by eye (pair_NNN_L/R.png)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   holdkey NAME ms         hold a key
 //   click [ms] / rclick [ms] left / right mouse button through raw input
@@ -40,6 +42,8 @@ struct Step {
     DWORD ms = 0;
     bool shot = false;
     bool capture = false;
+    bool pair = false;
+    float stereo = -1;
 };
 
 static std::mutex g_mx;
@@ -113,6 +117,12 @@ static void run_line(const std::string& line) {
         g_steps.push_back(Step{.capture = true});
     } else if (cmd == "shot") {
         g_steps.push_back(Step{.shot = true});
+    } else if (cmd == "pair") {
+        g_steps.push_back(Step{.pair = true});
+    } else if (cmd == "stereo") {
+        float sep = 0;
+        ss >> sep;
+        g_steps.push_back(Step{.stereo = sep < 0 ? 0 : sep});
     } else if (cmd == "key" || cmd == "holdkey") {
         std::string name;
         DWORD ms = 120;
@@ -204,6 +214,8 @@ static void advance_locked() {
         if (g_cur.dx || g_cur.dy) post_mouse(0, g_cur.dx, g_cur.dy);
         g_pending.shot |= g_cur.shot;
         g_pending.capture |= g_cur.capture;
+        g_pending.pair |= g_cur.pair;
+        if (g_cur.stereo >= 0) g_pending.stereo = g_cur.stereo;
     }
 }
 

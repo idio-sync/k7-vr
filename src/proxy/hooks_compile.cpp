@@ -6,7 +6,9 @@
 #include <d3dcommon.h>
 
 #include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace k7 {
@@ -21,6 +23,21 @@ uint64_t dxbc_hash(const void* bytecode, size_t size) {
     uint64_t h = 0;
     if (size >= 12 && memcmp(bytecode, "DXBC", 4) == 0) memcpy(&h, static_cast<const uint8_t*>(bytecode) + 4, 8);
     return h;
+}
+
+// Stereo patch for the GX vertex template: a per-eye offset in eye space (slot b12, set by
+// hooks_d3d.cpp each frame), applied to perspective draws only (projMatrix row 3 = 0,0,-1,0;
+// orthographic HUD draws have 0,0,0,1 and stay put). Returns false if the source isn't the template.
+static bool patch_stereo(std::string& src) {
+    const char* kConsts = "cbuffer VertexShaderConsts";
+    const char* kProject = "_out.outPosition.x = dot(outPos, projMatrix[0]);";
+    size_t consts = src.find(kConsts);
+    size_t project = src.find(kProject);
+    if (consts == std::string::npos || project == std::string::npos) return false;
+    src.insert(project,
+               "if (projMatrix[3].w == 0) outPos.x += k7_eye.x;  // k7vr stereo\n\t");
+    src.insert(consts, "cbuffer K7Stereo : register(b12) { float4 k7_eye; };  // k7vr stereo\n\n");
+    return true;
 }
 
 static bool read_file(const std::wstring& path, std::vector<char>& out) {
@@ -38,9 +55,19 @@ static bool read_file(const std::wstring& path, std::vector<char>& out) {
 static HRESULT WINAPI hk_D3DCompile(LPCVOID src, SIZE_T len, LPCSTR name, const D3D_SHADER_MACRO* defines,
                                     ID3DInclude* include, LPCSTR entry, LPCSTR target, UINT flags1, UINT flags2,
                                     ID3DBlob** code, ID3DBlob** errors) {
+    static const bool stereo = GetPrivateProfileIntW(L"probe", L"stereo_patch", 1, path_in(L"k7vr.ini").c_str()) != 0;
+    std::string patched;
+    if (stereo && target && strncmp(target, "vs_", 3) == 0) {
+        patched.assign(static_cast<const char*>(src), len);
+        if (patch_stereo(patched)) {
+            src = patched.data();
+            len = patched.size();
+        }
+    }
     HRESULT hr = o_D3DCompile(src, len, name, defines, include, entry, target, flags1, flags2, code, errors);
     if (FAILED(hr) || !code || !*code) {
-        logf("D3DCompile %s failed 0x%08x", target ? target : "?", hr);
+        logf("D3DCompile %s failed 0x%08x: %s", target ? target : "?", hr,
+             errors && *errors ? static_cast<const char*>((*errors)->GetBufferPointer()) : "");
         return hr;
     }
     uint64_t h = dxbc_hash((*code)->GetBufferPointer(), (*code)->GetBufferSize());

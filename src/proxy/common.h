@@ -38,6 +38,8 @@ bool save_png(const std::wstring& path, UINT width, UINT height, UINT pitch, con
 struct Requests {
     bool capture = false;
     bool shot = false;
+    bool pair = false;       // save the next two frames (left and right eye in stereo mode)
+    float stereo = -1;       // >= 0: new eye separation in GX eye-space units (0 = off)
 };
 Requests control_poll();      // once per frame
 bool fake_pad_enabled();

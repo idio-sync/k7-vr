@@ -176,6 +176,111 @@ static bool g_want_image;                // this frame's image is wanted (shot o
 static ID3D11Texture2D* g_image;         // our copy of the final blit's source
 static bool g_image_valid;
 
+// ---- Desktop stereo test ----
+// The patched vertex template reads an eye offset from slot b12. With a separation set, every
+// draw into the scene target (a render target with a same-sized depth buffer) is drawn twice:
+// left eye into the game's targets, right eye into mirror targets we own. Clears are mirrored
+// too. Post passes and EFB copies only see the left eye; that's fine for a probe.
+
+constexpr UINT kStereoSlot = 12;
+static ID3D11Buffer* g_eye_cb[2];  // left, right
+static float g_sep;                // eye separation in GX eye-space units; 0 = mono
+static bool g_pair;                // save both eyes at the end of this frame
+static unsigned g_pair_index;
+
+struct MirrorView {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11View* view = nullptr;  // ID3D11RenderTargetView or ID3D11DepthStencilView
+};
+static std::unordered_map<ID3D11View*, MirrorView> g_mirrors;
+static ID3D11RenderTargetView* g_scene_rtv;  // last mirrored scene target (for `pair`)
+
+static void set_eye_offsets() {
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!g_eye_cb[eye]) return;
+        const float offset = g_sep <= 0 ? 0 : (eye == 0 ? g_sep / 2 : -g_sep / 2);  // scene moves opposite to the eye
+        const float data[4] = {offset, 0, 0, 0};
+        g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, data, 0, 0);
+    }
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+}
+
+static ID3D11Texture2D* texture_of(ID3D11View* view, D3D11_TEXTURE2D_DESC* desc) {
+    ID3D11Resource* res = nullptr;
+    view->GetResource(&res);
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    res->Release();  // the view keeps it alive
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return nullptr;
+    auto tex = static_cast<ID3D11Texture2D*>(res);
+    tex->GetDesc(desc);
+    return tex;
+}
+
+static MirrorView* mirror_of(ID3D11View* view, bool depth) {
+    auto it = g_mirrors.find(view);
+    if (it != g_mirrors.end()) return &it->second;
+    D3D11_TEXTURE2D_DESC d;
+    if (!texture_of(view, &d)) return nullptr;
+    MirrorView m;
+    d.MiscFlags = 0;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &m.tex))) return nullptr;
+    HRESULT hr;
+    if (depth) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC vd;
+        static_cast<ID3D11DepthStencilView*>(view)->GetDesc(&vd);
+        hr = g_dev->CreateDepthStencilView(m.tex, &vd, reinterpret_cast<ID3D11DepthStencilView**>(&m.view));
+    } else {
+        D3D11_RENDER_TARGET_VIEW_DESC vd;
+        static_cast<ID3D11RenderTargetView*>(view)->GetDesc(&vd);
+        hr = g_dev->CreateRenderTargetView(m.tex, &vd, reinterpret_cast<ID3D11RenderTargetView**>(&m.view));
+    }
+    if (FAILED(hr)) {
+        m.tex->Release();
+        return nullptr;
+    }
+    logf("stereo: mirror %s %ux%u f%d", depth ? "depth" : "target", d.Width, d.Height, d.Format);
+    return &g_mirrors.emplace(view, m).first->second;
+}
+
+// Returns true and fills the mirror views when the current targets are a scene target pair.
+static bool scene_mirrors(ID3D11RenderTargetView** rtv, ID3D11DepthStencilView** dsv, MirrorView** mrt,
+                          MirrorView** mds) {
+    g_ctx->OMGetRenderTargets(1, rtv, dsv);
+    bool ok = false;
+    if (*rtv && *dsv) {
+        D3D11_TEXTURE2D_DESC rd, dd;
+        if (texture_of(*rtv, &rd) && texture_of(*dsv, &dd) && rd.Width == dd.Width && rd.Height == dd.Height) {
+            *mrt = mirror_of(*rtv, false);
+            *mds = mirror_of(*dsv, true);
+            ok = *mrt && *mds;
+        }
+    }
+    return ok;
+}
+
+// Runs `draw` for the left eye, then again for the right eye into the mirror targets.
+template <typename DrawFn>
+static void draw_stereo(DrawFn draw) {
+    draw();
+    if (g_sep <= 0) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    MirrorView* mrt = nullptr;
+    MirrorView* mds = nullptr;
+    if (scene_mirrors(&rtv, &dsv, &mrt, &mds)) {
+        auto mirror_rtv = static_cast<ID3D11RenderTargetView*>(mrt->view);
+        g_ctx->OMSetRenderTargets(1, &mirror_rtv, static_cast<ID3D11DepthStencilView*>(mds->view));
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[1]);
+        draw();
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+        g_ctx->OMSetRenderTargets(1, &rtv, dsv);
+        g_scene_rtv = rtv;
+    }
+    if (rtv) rtv->Release();
+    if (dsv) dsv->Release();
+}
+
 static void grab_final_source() {
     ID3D11RenderTargetView* rtv = nullptr;
     g_ctx->OMGetRenderTargets(1, &rtv, nullptr);
@@ -233,24 +338,24 @@ static void before_draw(const char* kind, UINT count, UINT instances) {
 
 static void STDMETHODCALLTYPE w_DrawIndexed(ID3D11DeviceContext* c, UINT count, UINT start, INT base) {
     before_draw("DrawIndexed", count, 1);
-    real_of(c)->DrawIndexed(count, start, base);
+    draw_stereo([&] { real_of(c)->DrawIndexed(count, start, base); });
 }
 
 static void STDMETHODCALLTYPE w_Draw(ID3D11DeviceContext* c, UINT count, UINT start) {
     before_draw("Draw", count, 1);
-    real_of(c)->Draw(count, start);
+    draw_stereo([&] { real_of(c)->Draw(count, start); });
 }
 
 static void STDMETHODCALLTYPE w_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT count, UINT inst, UINT start,
                                                      INT base, UINT start_inst) {
     before_draw("DrawIndexedInstanced", count, inst);
-    real_of(c)->DrawIndexedInstanced(count, inst, start, base, start_inst);
+    draw_stereo([&] { real_of(c)->DrawIndexedInstanced(count, inst, start, base, start_inst); });
 }
 
 static void STDMETHODCALLTYPE w_DrawInstanced(ID3D11DeviceContext* c, UINT count, UINT inst, UINT start,
                                               UINT start_inst) {
     before_draw("DrawInstanced", count, inst);
-    real_of(c)->DrawInstanced(count, inst, start, start_inst);
+    draw_stereo([&] { real_of(c)->DrawInstanced(count, inst, start, start_inst); });
 }
 
 static HRESULT STDMETHODCALLTYPE w_Map(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3D11_MAP type,
@@ -297,6 +402,8 @@ static void STDMETHODCALLTYPE w_ClearRTV(ID3D11DeviceContext* c, ID3D11RenderTar
         appendf(g_cap.text, " color=%g,%g,%g,%g\n", color[0], color[1], color[2], color[3]);
     }
     real_of(c)->ClearRenderTargetView(rtv, color);
+    if (auto it = g_mirrors.find(rtv); it != g_mirrors.end())
+        g_ctx->ClearRenderTargetView(static_cast<ID3D11RenderTargetView*>(it->second.view), color);
 }
 
 static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthStencilView* dsv, UINT flags, FLOAT d,
@@ -307,6 +414,8 @@ static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthSten
         appendf(g_cap.text, " flags=%u depth=%g\n", flags, d);
     }
     real_of(c)->ClearDepthStencilView(dsv, flags, d, st);
+    if (auto it = g_mirrors.find(dsv); it != g_mirrors.end())
+        g_ctx->ClearDepthStencilView(static_cast<ID3D11DepthStencilView*>(it->second.view), flags, d, st);
 }
 
 static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID3D11Resource* dst, UINT dsub, UINT x,
@@ -552,6 +661,21 @@ static void end_frame(IDXGISwapChain* sc) {
         save_frame_image(sc, path_in(name));
         logf("screenshot %ls", name);
     }
+    if (g_pair) {
+        g_pair = false;
+        auto it = g_scene_rtv ? g_mirrors.find(g_scene_rtv) : g_mirrors.end();
+        if (g_sep > 0 && it != g_mirrors.end()) {
+            D3D11_TEXTURE2D_DESC d;
+            wchar_t name[64];
+            swprintf(name, 64, L"pair_%03u_L.png", g_pair_index);
+            save_texture(texture_of(g_scene_rtv, &d), path_in(name));
+            swprintf(name, 64, L"pair_%03u_R.png", g_pair_index);
+            save_texture(it->second.tex, path_in(name));
+            logf("pair %u written (separation %g)", g_pair_index++, g_sep);
+        } else {
+            logf("pair: stereo is off or no scene target was mirrored this frame");
+        }
+    }
 
     Requests req = control_poll();
     static bool f10_down;
@@ -559,6 +683,11 @@ static void end_frame(IDXGISwapChain* sc) {
     if (f10 && !f10_down) req.capture = true;
     f10_down = f10;
     if (req.shot) g_cap.shot = true;
+    if (req.pair) g_pair = true;
+    if (req.stereo >= 0) {
+        g_sep = req.stereo;
+        logf("stereo separation %g", g_sep);
+    }
     if (req.capture) {
         g_ids.clear();
         g_cap.active = true;
@@ -568,6 +697,7 @@ static void end_frame(IDXGISwapChain* sc) {
 
     // Set up the next frame's image grab.
     g_want_image = g_cap.shot || g_cap.active;
+    set_eye_offsets();
     g_image_valid = false;
     ID3D11Texture2D* bb = nullptr;
     if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) {
@@ -665,6 +795,13 @@ static void hook_device(ID3D11Device* dev) {
     hook(dev, vt::dev_CreatePixelShader, &hk_CreatePS, &o_CreatePS);
     hook(dev, vt::dev_CreateDeferredContext, &hk_CreateDeferredContext, &o_CreateDeferredContext);
     hook(dev, vt::dev_GetImmediateContext, &hk_GetImmediateContext, &o_GetImmediateContext);
+
+    D3D11_BUFFER_DESC eye{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+    const float zero[4] = {};
+    D3D11_SUBRESOURCE_DATA init{zero, 0, 0};
+    dev->CreateBuffer(&eye, &init, &g_eye_cb[0]);
+    dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 
     g_wrapped = wrap_context(g_ctx);
     wrap(vt::ctx_DrawIndexed, &w_DrawIndexed);

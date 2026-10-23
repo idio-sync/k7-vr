@@ -27,7 +27,9 @@ if ($running) { $running | Wait-Process -Timeout 60 -ErrorAction SilentlyContinu
 if ($running) { throw "Killer7Win is already running (PID $($running.Id -join ', '))" }
 Remove-Item (Join-Path $Game 'k7vr\status.txt') -ErrorAction SilentlyContinue
 # Shot and capture numbering restarts each run; clear the previous run's files.
-Get-ChildItem (Join-Path $Game 'k7vr') -File | Where-Object Name -match '^(shot|capture)_\d+\.(png|txt)$' | Remove-Item
+Get-ChildItem (Join-Path $Game 'k7vr') -File | Where-Object Name -match '^((shot|capture)_\d+|pair_\d+_[LRC])\.(png|txt)$' | Remove-Item
+# A pipeline cache would skip D3DCompile, and with it the probe's shader patches.
+Remove-Item (Join-Path $Game 'Shaders\pipeline.cache') -ErrorAction SilentlyContinue
 # The probe keeps the window minimized (k7vr.ini minimized=1); start it that way too.
 $p = Start-Process (Join-Path $Game 'Killer7Win.exe') -WorkingDirectory $Game -WindowStyle Minimized -PassThru
 Set-Content $pidFile $p.Id
