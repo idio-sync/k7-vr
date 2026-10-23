@@ -5,6 +5,7 @@
 
 #include <dxgi1_2.h>
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
@@ -195,12 +196,20 @@ struct MirrorView {
 static std::unordered_map<ID3D11View*, MirrorView> g_mirrors;
 static ID3D11RenderTargetView* g_scene_rtv;  // last mirrored scene target (for `pair`)
 
+static float g_yaw, g_pitch;  // free look from the game camera, degrees (+yaw right, +pitch up)
+
+// Eye-space transform per eye: undo the head rotation, then the eye offset.
 static void set_eye_offsets() {
+    const float d2r = 3.14159265f / 180;
+    const float cy = cosf(g_yaw * d2r), sy = sinf(g_yaw * d2r);
+    const float cp = cosf(g_pitch * d2r), sp = sinf(g_pitch * d2r);
     for (int eye = 0; eye < 2; ++eye) {
         if (!g_eye_cb[eye]) return;
         const float offset = g_sep <= 0 ? 0 : (eye == 0 ? g_sep / 2 : -g_sep / 2);  // scene moves opposite to the eye
-        const float data[4] = {offset, 0, 0, 0};
-        g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, data, 0, 0);
+        const float m[12] = {cy,       0,   sy,      offset,  //
+                             -sp * sy, cp,  sp * cy, 0,       //
+                             -cp * sy, -sp, cp * cy, 0};
+        g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, m, 0, 0);
     }
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 }
@@ -684,6 +693,11 @@ static void end_frame(IDXGISwapChain* sc) {
     f10_down = f10;
     if (req.shot) g_cap.shot = true;
     if (req.pair) g_pair = true;
+    if (req.view) {
+        g_yaw = req.yaw;
+        g_pitch = req.pitch;
+        logf("view yaw %g pitch %g", g_yaw, g_pitch);
+    }
     if (req.stereo >= 0) {
         g_sep = req.stereo;
         logf("stereo separation %g", g_sep);
@@ -796,8 +810,8 @@ static void hook_device(ID3D11Device* dev) {
     hook(dev, vt::dev_CreateDeferredContext, &hk_CreateDeferredContext, &o_CreateDeferredContext);
     hook(dev, vt::dev_GetImmediateContext, &hk_GetImmediateContext, &o_GetImmediateContext);
 
-    D3D11_BUFFER_DESC eye{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
-    const float zero[4] = {};
+    D3D11_BUFFER_DESC eye{48, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+    const float zero[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     D3D11_SUBRESOURCE_DATA init{zero, 0, 0};
     dev->CreateBuffer(&eye, &init, &g_eye_cb[0]);
     dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);

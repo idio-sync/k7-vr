@@ -29,6 +29,13 @@ void install_folder_hook();
 void install_file_hooks();
 void start_audio_mute();
 
+// Memory probing (memscan.cpp), run from the command file on the render thread.
+void mem_scanf(float lo, float hi);
+void mem_rescanf(float lo, float hi);
+void mem_peekf(uintptr_t addr);
+void mem_pokef(uintptr_t addr, float value);
+void mem_pokehits(float value);
+
 // DXBC checksum (first 8 bytes of the container's MD5), used to name shaders.
 uint64_t dxbc_hash(const void* bytecode, size_t size);
 
@@ -40,6 +47,8 @@ struct Requests {
     bool shot = false;
     bool pair = false;       // save the next two frames (left and right eye in stereo mode)
     float stereo = -1;       // >= 0: new eye separation in GX eye-space units (0 = off)
+    bool view = false;       // new free-look angles from the game camera
+    float yaw = 0, pitch = 0;
 };
 Requests control_poll();      // once per frame
 bool fake_pad_enabled();

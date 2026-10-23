@@ -3,6 +3,7 @@
 //   capture                 next frame's draw list + PNG (also F10)
 //   shot                    PNG of the next frame
 //   stereo SEP              alternate eyes every frame, SEP apart in GX eye-space units (0 = off)
+//   view YAW PITCH          free look from the game camera, degrees (+yaw right, +pitch up)
 //   pair                    PNGs of the next two frames, named by eye (pair_NNN_L/R.png)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   holdkey NAME ms         hold a key
@@ -14,6 +15,7 @@
 //   rstick rx ry ms         right stick, -1..1
 //   trig l r ms             triggers, 0..1
 //   wait ms                 idle
+//   scanf LO HI / rescanf LO HI / peekf ADDR / pokef ADDR V / pokehits V   memory probing (memscan.cpp)
 //   activate                tell the game its window is active (it ignores input otherwise)
 //   mouse x y               where the game sees the cursor, in window client pixels (default: off-window)
 //   log text                marker in k7vr.log
@@ -26,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -44,6 +47,9 @@ struct Step {
     bool capture = false;
     bool pair = false;
     float stereo = -1;
+    bool view = false;
+    float yaw = 0, pitch = 0;
+    std::function<void()> action;  // run when the step starts (memory commands)
 };
 
 static std::mutex g_mx;
@@ -119,6 +125,10 @@ static void run_line(const std::string& line) {
         g_steps.push_back(Step{.shot = true});
     } else if (cmd == "pair") {
         g_steps.push_back(Step{.pair = true});
+    } else if (cmd == "view") {
+        float yaw = 0, pitch = 0;
+        ss >> yaw >> pitch;
+        g_steps.push_back(Step{.view = true, .yaw = yaw, .pitch = pitch});
     } else if (cmd == "stereo") {
         float sep = 0;
         ss >> sep;
@@ -175,6 +185,23 @@ static void run_line(const std::string& line) {
         DWORD ms = 0;
         ss >> ms;
         g_steps.push_back(Step{.ms = ms});
+    } else if (cmd == "scanf" || cmd == "rescanf") {
+        float lo = 0, hi = 0;
+        ss >> lo >> hi;
+        bool rescan = cmd == "rescanf";
+        g_steps.push_back(Step{.action = [=] { (rescan ? mem_rescanf : mem_scanf)(lo, hi); }});
+    } else if (cmd == "peekf" || cmd == "pokef" || cmd == "pokehits") {
+        std::string addr;
+        float v = 0;
+        if (cmd != "pokehits") ss >> addr;
+        ss >> v;
+        uintptr_t a = uintptr_t(strtoul(addr.c_str(), nullptr, 16));
+        if (cmd == "peekf")
+            g_steps.push_back(Step{.action = [=] { mem_peekf(a); }});
+        else if (cmd == "pokef")
+            g_steps.push_back(Step{.action = [=] { mem_pokef(a, v); }});
+        else
+            g_steps.push_back(Step{.action = [=] { mem_pokehits(v); }});
     } else if (cmd == "activate") {
         post_activate();
     } else if (cmd == "mouse") {
@@ -211,11 +238,17 @@ static void advance_locked() {
         ++g_seq;
         if (g_cur.vk) post_key(g_cur.vk, true);
         if (g_cur.mouse) post_mouse(g_cur.mouse == 1 ? RI_MOUSE_LEFT_BUTTON_DOWN : RI_MOUSE_RIGHT_BUTTON_DOWN, 0, 0);
+        if (g_cur.action) g_cur.action();
         if (g_cur.dx || g_cur.dy) post_mouse(0, g_cur.dx, g_cur.dy);
         g_pending.shot |= g_cur.shot;
         g_pending.capture |= g_cur.capture;
         g_pending.pair |= g_cur.pair;
         if (g_cur.stereo >= 0) g_pending.stereo = g_cur.stereo;
+        if (g_cur.view) {
+            g_pending.view = true;
+            g_pending.yaw = g_cur.yaw;
+            g_pending.pitch = g_cur.pitch;
+        }
     }
 }
 
