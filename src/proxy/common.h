@@ -43,6 +43,10 @@ void mem_watchhit(size_t index, int hits);
 void mem_patch(uintptr_t addr, const std::vector<uint8_t>& bytes);
 void scan_projection();  // hooks_d3d.cpp
 
+// FOV inflation (fov_inflate.cpp): the game culls with a wider FOV; shaders restore framing.
+void set_fov_inflate(float degrees);  // 0 = off
+float fov_inflate_scale();
+
 // DXBC checksum (first 8 bytes of the container's MD5), used to name shaders.
 uint64_t dxbc_hash(const void* bytecode, size_t size);
 

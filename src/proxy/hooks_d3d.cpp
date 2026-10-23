@@ -207,9 +207,11 @@ static void set_eye_offsets() {
     for (int eye = 0; eye < 2; ++eye) {
         if (!g_eye_cb[eye]) return;
         const float offset = g_sep <= 0 ? 0 : (eye == 0 ? g_sep / 2 : -g_sep / 2);  // scene moves opposite to the eye
-        const float m[12] = {cy,       0,   sy,      offset,  //
+        const float s = fov_inflate_scale();
+        const float m[16] = {cy,       0,   sy,      offset,  //
                              -sp * sy, cp,  sp * cy, 0,       //
-                             -cp * sy, -sp, cp * cy, 0};
+                             -cp * sy, -sp, cp * cy, 0,       //
+                             s,        s,   0,       0};
         g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, m, 0, 0);
     }
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
@@ -819,8 +821,8 @@ static void hook_device(ID3D11Device* dev) {
     hook(dev, vt::dev_CreateDeferredContext, &hk_CreateDeferredContext, &o_CreateDeferredContext);
     hook(dev, vt::dev_GetImmediateContext, &hk_GetImmediateContext, &o_GetImmediateContext);
 
-    D3D11_BUFFER_DESC eye{48, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
-    const float zero[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    D3D11_BUFFER_DESC eye{64, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+    const float zero[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0};
     D3D11_SUBRESOURCE_DATA init{zero, 0, 0};
     dev->CreateBuffer(&eye, &init, &g_eye_cb[0]);
     dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);

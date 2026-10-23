@@ -1,0 +1,5 @@
+# After to_gameplay.txt: walk down the first corridor, which triggers a cutscene and a
+# switch to another Smith in a lobby (low fixed camera). ~60 s.
+holdkey W 9000
+wait 45000
+shot

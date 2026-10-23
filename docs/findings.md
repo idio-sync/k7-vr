@@ -6,10 +6,10 @@ motion-controller-aimed gun in first-person aim mode.
 
 ## Verdict so far
 
-**Go, with one big known problem: culling.** Stereo rendering is easy here and is proven
-working in-game. The game's CPU-side culling against its own camera means looking around
-shows holes; fixing that is the main reverse-engineering job before VR is worth wearing.
-Not reached yet: real gameplay (running section, aim mode with the gun model).
+**Go.** Stereo rendering is easy here and proven in-game. Culling, the main risk, has a working
+fix (FOV inflation through a code patch, framing restored in the shader). Remaining known
+problems are view-dependent effect cards, empty space behind some fixed cameras, and finding
+the aim variables for controller aiming. The gun in aim mode is an ordinary eye-space model.
 
 ## What the port is
 
@@ -79,6 +79,22 @@ Not reached yet: real gameplay (running section, aim mode with the gun model).
   open: the first corridor is too enclosed to show culling; needs an open street section.
   (Near 0.1, far 10000, aspect 1.18 in the first section.)
 
+**Culling, settled.** In the lobby (second running section), with the view held still, the
+draw count rises with the game FOV: 153 at the normal ~60°, 167 at 120°, 170 at 160°. So the
+game frustum-culls against its camera FOV, and inflating that FOV widens culling.
+`fov_inflate DEG` implements it: a stub at `10301a` (where the manager copies the FOV into the
+render camera) records the intended FOV and writes the inflated one; the patched vertex shader
+scales clip x/y by `tan(inflated/2)/tan(intended/2)`, so the front view keeps its framing
+(verified) while more of the world is submitted. In VR the headset projection replaces this.
+
+Side effect: the extra draws at 150° are all 4-vertex quads with one pixel shader
+(`d358d9e91e34870e`) that samples a screen-projected texture (`texCoord.xy /= texCoord.z`) over a
+flat colour. They are view-dependent effect cards made for the game camera; from other angles
+they show as flat blue slabs (the "cyan voids" seen earlier are likely these, not missing
+geometry). They need special handling in VR (skip when off-axis, or draw them only for the
+game view). Separately, fixed camera spots can sit at or behind walls, so some directions
+genuinely have no geometry.
+
 **Aim mode** (hold Space): first person, the gun and hand are the first perspective draws
 after the clear, with the character pixel shader and the same projection as the world,
 ~2–7 units in front of the camera. The gun is an ordinary eye-space model, so moving it to a
@@ -108,8 +124,9 @@ which matches the stereo parallax measurements. IPD in game units ≈ 0.2–0.3 
 
 ## Next steps (proposed)
 
-1. Get to the first running section and first-person aim mode: capture both; find the gun
-   model's draws and where the aim direction lives (needed for controller aiming).
-2. Static analysis of the exe for the projection build and culling test; widen culling.
-3. Calibrate units/IPD.
+1. Find where the aim direction lives (camera/aim angles in aim mode), for controller aiming,
+   and how to tag the gun/hand draws reliably (first character-shader draws after the clear in
+   aim mode is the current lead).
+2. Decide how to treat the effect cards (`d358d9e91e34870e` quads) and empty directions.
+3. Calibrate units/IPD (e.g. from a character's height).
 4. Then the real design doc: OpenVR output, per-eye post chain, HUD panel, aim mapping.

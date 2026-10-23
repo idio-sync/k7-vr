@@ -221,6 +221,10 @@ static void run_line(const std::string& line) {
         int hits = 8;
         ss >> index >> hits;
         g_steps.push_back(Step{.action = [=] { mem_watchhit(index, hits); }});
+    } else if (cmd == "fov_inflate") {
+        float deg = 0;
+        ss >> deg;
+        g_steps.push_back(Step{.action = [=] { set_fov_inflate(deg); }});
     } else if (cmd == "scanproj") {
         g_steps.push_back(Step{.action = [] { scan_projection(); }});
     } else if (cmd == "scanpair") {

@@ -28,17 +28,23 @@ uint64_t dxbc_hash(const void* bytecode, size_t size) {
 // Stereo patch for the GX vertex template: a per-eye head transform (3x4, eye-space rotation
 // plus eye offset; slot b12, set by hooks_d3d.cpp), applied to perspective draws only
 // (projMatrix row 3 = 0,0,-1,0; orthographic HUD draws have 0,0,0,1 and stay put).
+// k7_proj.xy scales clip x/y afterwards (undoes FOV inflation; 1 otherwise).
 // Returns false if the source isn't the template.
 static bool patch_stereo(std::string& src) {
     const char* kConsts = "cbuffer VertexShaderConsts";
     const char* kProject = "_out.outPosition.x = dot(outPos, projMatrix[0]);";
+    const char* kPixelCenter = "_out.outPosition.xy = _out.outPosition.xy - _out.outPosition.w * pixelCenter.xy;";
+    size_t pixel = src.find(kPixelCenter);
+    if (pixel == std::string::npos) return false;
+    src.insert(pixel + strlen(kPixelCenter),
+               "\n\tif (projMatrix[3].w == 0) _out.outPosition.xy *= k7_proj.xy;  // k7vr stereo");
     size_t consts = src.find(kConsts);
     size_t project = src.find(kProject);
     if (consts == std::string::npos || project == std::string::npos) return false;
     src.insert(project,
                "if (projMatrix[3].w == 0) outPos.xyz = float3(dot(k7_head[0], outPos), dot(k7_head[1], outPos), "
                "dot(k7_head[2], outPos));  // k7vr stereo\n\t");
-    src.insert(consts, "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; };  // k7vr stereo\n\n");
+    src.insert(consts, "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; float4 k7_proj; };  // k7vr stereo\n\n");
     return true;
 }
 
