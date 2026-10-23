@@ -1,12 +1,39 @@
 # After new_game.txt: the Christopher Mills / Garcian cutscene and the Assignment No. 33
-# briefing run ~110 s after the tutorial shot (Esc doesn't skip them). Then decline
-# "learn the controls?" (D = No) into the first running section (a corridor, third person).
-wait 110000
-shot
+# briefing take ~110-150 s after the tutorial shot (Esc doesn't skip them). D + Space every
+# 10 s answers "learn the controls?" with No whenever it appears; both are harmless before
+# (cutscene) and after (Space briefly enters aim mode). Ends in the first running section.
+wait 90000
 key D
-wait 800
-shot
+wait 400
 key SPACE
-wait 12000
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
+key D
+wait 400
+key SPACE
+wait 9600
 shot
 # Aim mode: hold Space (keyboard enter_battle_mode); first person with the gun model.
