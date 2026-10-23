@@ -5,7 +5,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(module);
         k7::init_paths();
         k7::log_open();
-        k7::logf("k7vr probe loaded into %ls", k7::g_game_dir.c_str());
+        k7::logf("k7vr probe loaded into %ls, exe base %p", k7::g_game_dir.c_str(), GetModuleHandleW(nullptr));
         // The exe's imports are bound before DLL initializers run, so its IAT can be patched here.
         k7::install_folder_hook();
         k7::install_compile_hook();

@@ -4,6 +4,7 @@
 #include <d3d11.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct _XINPUT_STATE;
 
@@ -33,8 +34,14 @@ void start_audio_mute();
 void mem_scanf(float lo, float hi);
 void mem_rescanf(float lo, float hi);
 void mem_peekf(uintptr_t addr);
+void mem_peekd(uintptr_t addr);
 void mem_pokef(uintptr_t addr, float value);
 void mem_pokehits(float value);
+void mem_scanpair(float a, float b, float tol, int window);
+void mem_watch(uintptr_t addr, int hits);
+void mem_watchhit(size_t index, int hits);
+void mem_patch(uintptr_t addr, const std::vector<uint8_t>& bytes);
+void scan_projection();  // hooks_d3d.cpp
 
 // DXBC checksum (first 8 bytes of the container's MD5), used to name shaders.
 uint64_t dxbc_hash(const void* bytecode, size_t size);

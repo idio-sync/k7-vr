@@ -58,6 +58,35 @@ Not reached yet: real gameplay (running section, aim mode with the gun model).
 - **Post effects and EFB copies** read only the left-eye target in the mirror approach. A real
   renderer must give each eye its own post chain (or run those passes per eye).
 
+## Round 2 (2026-10-23): camera code, aim mode
+
+**Camera and projection, from static analysis + hardware write watches** (RVAs, exe base
+0x400000 in the file; the probe logs the runtime base):
+
+- GX state lives behind the global pointer at VA `0x86e32c`; the projection is at `+0xc18`
+  (type at `+0xc58`). `7d1d0` is `GXSetProjection(matrix /*ecx*/, type /*edx*/)`; `7d250`
+  copies it back out (`GXGetProjectionv`). 14 call sites set projections.
+- The 3D projection comes from `c17f1`, which calls `c1390(camera /*ecx*/, out /*edx*/)`:
+  camera `+0x50` = projection type (1 perspective via `c5200`, 2 off-axis frustum, 3 ortho),
+  `+0x38` near, `+0x3c` far, `+0x40` vertical FOV in degrees, `+0x44` aspect.
+  `c5200` is a plain perspective builder (`1/tan(fov·π/360)`, divided by aspect).
+- Camera manager: global pointer at VA `0x86fa54`. `+0x64` FOV, `+0x74` source camera,
+  `+0x7c` render camera. Each frame `ffd18`/`ffd27` write the FOV into the manager and the
+  source camera; `10301a` copies it into the render camera, which then renders (`c15f0`).
+- Experiment: NOP the camera FOV write at `ffd27` (`f30f114840` → `9090909090`) and set the
+  source camera FOV to 110°: the game renders the wider view (projection x 0.59 vs 1.32), no
+  crash. So the game FOV can be inflated from outside. Whether culling widens with it is still
+  open: the first corridor is too enclosed to show culling; needs an open street section.
+  (Near 0.1, far 10000, aspect 1.18 in the first section.)
+
+**Aim mode** (hold Space): first person, the gun and hand are the first perspective draws
+after the clear, with the character pixel shader and the same projection as the world,
+~2–7 units in front of the camera. The gun is an ordinary eye-space model, so moving it to a
+controller is an extra transform on those draws in the patched vertex shader.
+
+**Units:** the held gun sits ~2.5 units in front of the eye, so a unit is roughly 20–30 cm,
+which matches the stereo parallax measurements. IPD in game units ≈ 0.2–0.3 (calibrate).
+
 ## Driving the game unattended (for later testing)
 
 - Run minimized (user's request), muted via the process audio session, 60 fps cap while
@@ -68,7 +97,14 @@ Not reached yet: real gameplay (running section, aim mode with the gun model).
 - The language screen shows on every boot. The Target 00 opening is an aiming tutorial: put
   the laser dot on Garcian's silhouette and fire (the dot starts on his chest).
 - `tools\scripts\new_game.txt` gets from boot through the tutorial into the Christopher Mills
-  cutscene; timings around the boot logos are a bit fragile.
+  cutscene; `tools\scripts\to_gameplay.txt` continues into the first running section. Timings
+  around the boot logos are a bit fragile. In the test profile Esc is freed from exit_game
+  (moved to F12), but Esc still doesn't skip these cutscenes.
+- Menus: the Yes/No prompts need menu_left/right (A/D) before Space.
+- Probe commands for reverse engineering: `scanf`, `scanpair`, `scanproj`, `peekf/peekd`,
+  `pokef`, `patch ADDR HEX`, `watch ADDR` / `watchptr PTR OFF` (debug-register write watch that
+  logs the writer and return addresses), addresses as hex or `exe+RVA`.
+  `tools\disasm.py RVA [--func]` and `tools\xref.py` (disp/addr/float/calls) read the exe.
 
 ## Next steps (proposed)
 

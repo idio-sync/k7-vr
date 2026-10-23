@@ -32,6 +32,7 @@ static ID3D11DeviceContext* g_wrapped;  // what the game holds
 // ---- Constant buffer shadows (contents as last written by the CPU) ----
 
 static std::unordered_map<ID3D11Resource*, std::vector<uint8_t>> g_cb;
+static float g_last_proj[16];  // the most recent perspective projMatrix the game wrote
 static std::unordered_map<ID3D11Resource*, void*> g_cb_mapped;
 
 static UINT constant_buffer_size(ID3D11Resource* res) {
@@ -381,6 +382,10 @@ static void STDMETHODCALLTYPE w_Unmap(ID3D11DeviceContext* c, ID3D11Resource* re
         auto src = static_cast<const uint8_t*>(it->second);
         g_cb[res].assign(src, src + size);
         g_cb_mapped.erase(it);
+        if (size >= kTemplateCbMin) {
+            auto p = reinterpret_cast<const float*>(src + kProjOffset);
+            if (p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0) memcpy(g_last_proj, p, sizeof(g_last_proj));
+        }
     }
     real_of(c)->Unmap(res, sub);
 }
@@ -395,6 +400,10 @@ static void STDMETHODCALLTYPE w_UpdateSubresource(ID3D11DeviceContext* c, ID3D11
             UINT right = box ? box->right : size;
             if (right > size) right = size;
             if (left < right) memcpy(shadow.data() + left, src, right - left);
+            if (size >= kTemplateCbMin && left == 0 && right >= kTemplateCbMin) {
+                auto p = reinterpret_cast<const float*>(shadow.data() + kProjOffset);
+                if (p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0) memcpy(g_last_proj, p, sizeof(g_last_proj));
+            }
         } else if (g_cap.active) {
             appendf(g_cap.text, "     UpdateSubresource");
             describe_resource(g_cap.text, "dst", dst);
@@ -854,6 +863,15 @@ static HRESULT WINAPI hk_CreateDevice(IDXGIAdapter* adapter, D3D_DRIVER_TYPE typ
         if (ctx && *ctx == g_ctx) *ctx = g_wrapped;
     }
     return hr;
+}
+
+// scanproj: find where the game keeps the current perspective projection (its x and y scale,
+// exactly as last written to a constant buffer).
+void scan_projection() {
+    float p[16];
+    memcpy(p, g_last_proj, sizeof(p));
+    logf("scanproj: x %.9g y %.9g z %.9g/%.9g", p[0], p[5], p[10], p[11]);
+    if (p[0] != 0) mem_scanpair(p[0], p[5], 1e-6f, 64);
 }
 
 void install_d3d_hooks() {

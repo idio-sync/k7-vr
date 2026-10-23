@@ -107,6 +107,13 @@ static UINT parse_key(const std::string& name) {
     return 0;
 }
 
+// Hex address, or exe+RVA (relative to the game exe's load address).
+static uintptr_t parse_addr(const std::string& text) {
+    if (_strnicmp(text.c_str(), "exe+", 4) == 0)
+        return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + uintptr_t(strtoul(text.c_str() + 4, nullptr, 16));
+    return uintptr_t(strtoul(text.c_str(), nullptr, 16));
+}
+
 static SHORT axis(double v) {
     if (v > 1) v = 1;
     if (v < -1) v = -1;
@@ -190,12 +197,49 @@ static void run_line(const std::string& line) {
         ss >> lo >> hi;
         bool rescan = cmd == "rescanf";
         g_steps.push_back(Step{.action = [=] { (rescan ? mem_rescanf : mem_scanf)(lo, hi); }});
+    } else if (cmd == "patch") {
+        std::string addr, hex;
+        ss >> addr >> hex;
+        uintptr_t a = parse_addr(addr);
+        std::vector<uint8_t> bytes;
+        for (size_t i = 0; i + 1 < hex.size(); i += 2) bytes.push_back(uint8_t(strtoul(hex.substr(i, 2).c_str(), nullptr, 16)));
+        g_steps.push_back(Step{.action = [=] { mem_patch(a, bytes); }});
+    } else if (cmd == "peekd") {
+        std::string addr;
+        ss >> addr;
+        uintptr_t a = parse_addr(addr);
+        g_steps.push_back(Step{.action = [=] { mem_peekd(a); }});
+    } else if (cmd == "watchptr") {
+        std::string addr;
+        unsigned offset = 0;
+        int hits = 8;
+        ss >> addr >> std::hex >> offset >> std::dec >> hits;
+        uintptr_t a = parse_addr(addr);
+        g_steps.push_back(Step{.action = [=] { mem_watch(*reinterpret_cast<uintptr_t*>(a) + offset, hits); }});
+    } else if (cmd == "watchhit") {
+        size_t index = 0;
+        int hits = 8;
+        ss >> index >> hits;
+        g_steps.push_back(Step{.action = [=] { mem_watchhit(index, hits); }});
+    } else if (cmd == "scanproj") {
+        g_steps.push_back(Step{.action = [] { scan_projection(); }});
+    } else if (cmd == "scanpair") {
+        float a = 0, b = 0, tol = 0.001f;
+        int window = 64;
+        ss >> a >> b >> tol >> window;
+        g_steps.push_back(Step{.action = [=] { mem_scanpair(a, b, tol, window); }});
+    } else if (cmd == "watch") {
+        std::string addr;
+        int hits = 8;
+        ss >> addr >> hits;
+        uintptr_t a = parse_addr(addr);
+        g_steps.push_back(Step{.action = [=] { mem_watch(a, hits); }});
     } else if (cmd == "peekf" || cmd == "pokef" || cmd == "pokehits") {
         std::string addr;
         float v = 0;
         if (cmd != "pokehits") ss >> addr;
         ss >> v;
-        uintptr_t a = uintptr_t(strtoul(addr.c_str(), nullptr, 16));
+        uintptr_t a = parse_addr(addr);
         if (cmd == "peekf")
             g_steps.push_back(Step{.action = [=] { mem_peekf(a); }});
         else if (cmd == "pokef")

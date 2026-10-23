@@ -4,8 +4,11 @@
 //   peekf ADDR         log the float at ADDR (hex)
 //   pokef ADDR VALUE   write a float at ADDR (hex)
 //   pokehits VALUE     write VALUE to every current hit
+//   scanpair A B [TOL] [WINDOW]   floats near A with a float near B within WINDOW bytes
+//   watch ADDR [HITS]  hardware write watch on ADDR, logging the writer (ADDR 0 clears)
 #include "common.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -90,6 +93,17 @@ void mem_peekf(uintptr_t addr) {
     logf("peekf %08x = %g", unsigned(addr), v);
 }
 
+void mem_peekd(uintptr_t addr) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) {
+        logf("peekd %08x: not mapped", unsigned(addr));
+        return;
+    }
+    uint32_t v;
+    memcpy(&v, reinterpret_cast<void*>(addr), 4);
+    logf("peekd %08x = %08x", unsigned(addr), v);
+}
+
 void mem_pokef(uintptr_t addr, float value) {
     MEMORY_BASIC_INFORMATION mbi;
     if (!VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) || !readable_rw(mbi)) {
@@ -102,7 +116,149 @@ void mem_pokef(uintptr_t addr, float value) {
 
 }  // namespace k7
 
+#include <tlhelp32.h>
+
+#include <atomic>
+
 namespace k7 {
+
+// scanpair A B TOL WINDOW: floats within TOL of A that have a float within TOL of B no more
+// than WINDOW bytes away (e.g. a projection's x and y scale). Replaces the hit list.
+void mem_scanpair(float a, float b, float tol, int window) {
+    g_hits.clear();
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t r = 0x10000; r < 0x7FFF0000; r = uintptr_t(mbi.BaseAddress) + mbi.RegionSize) {
+        if (!VirtualQuery(reinterpret_cast<void*>(r), &mbi, sizeof(mbi))) break;
+        if (!readable_rw(mbi) || mbi.Type == MEM_MAPPED || in_own_module(r)) continue;
+        auto p = static_cast<const float*>(mbi.BaseAddress);
+        const ptrdiff_t n = ptrdiff_t(mbi.RegionSize / 4), w = window / 4;
+        for (ptrdiff_t i = 0; i < n; ++i) {
+            if (!(fabsf(p[i] - a) <= tol)) continue;  // also skips NaN
+            for (ptrdiff_t j = (i - w < 0 ? 0 : i - w); j <= i + w && j < n; ++j)
+                if (j != i && fabsf(p[j] - b) <= tol) {
+                    g_hits.push_back(uintptr_t(p + i));
+                    break;
+                }
+        }
+    }
+    log_hits("scanpair");
+}
+
+// ---- Hardware write watch (debug register DR0) ----
+// watch ADDR [HITS]: on every thread, break on 4-byte writes to ADDR; the vectored handler logs
+// the writing instruction and return addresses into the exe, then disarms after HITS hits.
+
+static std::atomic<uintptr_t> g_watch_addr;
+static std::atomic<int> g_watch_left;
+static uintptr_t g_exe_lo, g_exe_hi;
+
+static bool safe_read(const uintptr_t* p, uintptr_t* out) {
+    __try {
+        *out = *p;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static LONG CALLBACK watch_handler(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = ep->ContextRecord;
+    if (!(c->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    c->Dr6 = 0;
+    int left = --g_watch_left;
+    if (left >= 0) {
+        std::string chain;
+        char buf[24];
+        auto sp = reinterpret_cast<const uintptr_t*>(c->Esp);
+        int found = 0;
+        for (int i = 0; i < 256 && found < 10; ++i) {
+            uintptr_t v;
+            if (!safe_read(sp + i, &v)) break;
+            if (v >= g_exe_lo && v < g_exe_hi) {
+                snprintf(buf, sizeof(buf), " +%x", unsigned(v - g_exe_lo));
+                chain += buf;
+                ++found;
+            }
+        }
+        float v = 0;
+        memcpy(&v, reinterpret_cast<void*>(g_watch_addr.load()), 4);
+        logf("watch %08x = %g by exe+%x (tid %lu) stack:%s", unsigned(g_watch_addr.load()), v,
+             unsigned(c->Eip - g_exe_lo), GetCurrentThreadId(), chain.c_str());
+    }
+    if (left <= 0) c->Dr7 &= ~uintptr_t(3);  // disarm on this thread
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static DWORD WINAPI watch_arm_thread(void* param) {
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(param);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te{sizeof(te)};
+    int armed = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        if (SuspendThread(t) != DWORD(-1)) {
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(t, &c)) {
+                c.Dr0 = addr;
+                // L0 enable, R/W0 = 01 (write), LEN0 = 11 (4 bytes); addr = 0 clears.
+                c.Dr7 = addr ? (c.Dr7 & ~0xF0003ull) | 1 | (1 << 16) | (3 << 18) : c.Dr7 & ~0xF0003ull;
+                if (SetThreadContext(t, &c)) ++armed;
+            }
+            ResumeThread(t);
+        }
+        CloseHandle(t);
+    }
+    CloseHandle(snap);
+    logf("watch %08x %s on %d threads", unsigned(addr), addr ? "armed" : "cleared", armed);
+    return 0;
+}
+
+void mem_watch(uintptr_t addr, int hits) {
+    static PVOID handler = AddVectoredExceptionHandler(1, watch_handler);
+    (void)handler;
+    if (!g_exe_lo) {
+        auto exe = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(exe + reinterpret_cast<IMAGE_DOS_HEADER*>(exe)->e_lfanew);
+        g_exe_lo = uintptr_t(exe);
+        g_exe_hi = g_exe_lo + nt->OptionalHeader.SizeOfImage;
+    }
+    g_watch_addr = addr;
+    g_watch_left = hits;
+    // Debug registers of the calling thread can't be set from itself; a helper thread arms all others.
+    HANDLE t = CreateThread(nullptr, 0, watch_arm_thread, reinterpret_cast<void*>(addr), 0, nullptr);
+    if (t) CloseHandle(t);
+}
+
+void mem_watchhit(size_t index, int hits) {
+    if (index >= g_hits.size()) {
+        logf("watchhit %zu: only %zu hits", index, g_hits.size());
+        return;
+    }
+    mem_watch(g_hits[index], hits);
+}
+
+// patch ADDR HEX: overwrite code/data bytes (logs the old bytes so the patch can be undone).
+void mem_patch(uintptr_t addr, const std::vector<uint8_t>& bytes) {
+    DWORD old;
+    if (bytes.empty() || !VirtualProtect(reinterpret_cast<void*>(addr), bytes.size(), PAGE_EXECUTE_READWRITE, &old)) {
+        logf("patch %08x: failed", unsigned(addr));
+        return;
+    }
+    std::string was;
+    char buf[4];
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        snprintf(buf, sizeof(buf), "%02x", reinterpret_cast<uint8_t*>(addr)[i]);
+        was += buf;
+    }
+    memcpy(reinterpret_cast<void*>(addr), bytes.data(), bytes.size());
+    VirtualProtect(reinterpret_cast<void*>(addr), bytes.size(), old, &old);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(addr), bytes.size());
+    logf("patch %08x: %zu bytes (was %s)", unsigned(addr), bytes.size(), was.c_str());
+}
 
 void mem_pokehits(float value) {
     size_t n = 0;
