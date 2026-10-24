@@ -382,7 +382,7 @@ Requests control_poll() {
 
 bool fake_pad_enabled() {
     static int enabled = -1;
-    if (enabled < 0) enabled = GetPrivateProfileIntW(L"probe", L"fake_pad", 1, path_in(L"k7vr.ini").c_str());
+    if (enabled < 0) enabled = GetPrivateProfileIntW(L"probe", L"fake_pad", 0, path_in(L"k7vr.ini").c_str());
     return enabled != 0;
 }
 

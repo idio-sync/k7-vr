@@ -92,6 +92,10 @@ void init(ID3D11Device* device, ID3D11DeviceContext* context) {
     }
     wchar_t m[32];
     GetPrivateProfileStringW(L"vr", L"mode", L"off", m, 32, path_in(L"k7vr.ini").c_str());
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {  // safe mode: play flat without touching the ini
+        logf("vr: Shift held at start: safe mode, VR off");
+        wcscpy_s(m, L"off");
+    }
     if (_wcsicmp(m, L"openvr") == 0) {
         g_mode = init_openvr() ? Mode::OpenVR : Mode::Off;  // safe mode: no runtime -> play flat
     } else if (_wcsicmp(m, L"sim") == 0) {

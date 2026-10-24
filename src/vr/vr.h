@@ -2,7 +2,9 @@
 // The VR view: where each eye is and how it projects, from OpenVR or a simulated headset.
 //
 // k7vr.ini [vr]:
-//   mode = off | sim | openvr   (default off; openvr starts SteamVR, so it is never the default)
+//   mode = off | sim | openvr   (default off; openvr starts SteamVR, so it is never the default;
+//                               holding Shift while the game starts forces off, and so does
+//                               OpenVR failing to start)
 //   unit_m = 0.25               metres per game unit (world scale)
 //   ipd_m = 0.064               simulated eye separation (OpenVR uses the headset's)
 //   sim_fov = 100               simulated vertical FOV, degrees

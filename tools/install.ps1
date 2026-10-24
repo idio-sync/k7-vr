@@ -17,7 +17,9 @@ Copy-Item (Join-Path $out 'openvr_api.dll') $Game -Force   # loaded only with [v
 
 $k7 = Join-Path $Game 'k7vr'
 $profileDir = Join-Path $k7 'SavedGames\killer7'
+# These two folders switch on the test-copy behaviours: Saved Games redirected into k7vr\, and shader dumps.
 New-Item -ItemType Directory -Force $profileDir | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $k7 'shaders') | Out-Null
 
 # Private killer7.ini: the user's own bindings and volumes, but windowed. (The probe mutes
 # the process's audio session instead of zeroing volumes, which may stall movie playback.)

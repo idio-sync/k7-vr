@@ -28,6 +28,7 @@ void install_d3d_hooks();
 void install_compile_hook();
 void install_folder_hook();
 void install_file_hooks();
+void install_vr_profile();  // VR: the game's killer7.ini from k7vr\ with the controllers' bindings
 void start_audio_mute();
 
 // Memory probing (memscan.cpp), run from the command file on the render thread.

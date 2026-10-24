@@ -25,6 +25,8 @@ add_library(k7vr SHARED
     src/proxy/memscan.cpp
     src/proxy/fov_inflate.cpp
     src/proxy/aim.cpp
+    src/proxy/vr_profile.cpp
+    src/proxy/ini_bindings.cpp
     src/vr/headmath.cpp
     src/vr/vr.cpp
     src/vr/input.cpp
@@ -48,3 +50,6 @@ enable_testing()
 add_executable(k7vr_tests tests/test_headmath.cpp src/vr/headmath.cpp)
 target_compile_options(k7vr_tests PRIVATE /W4 /utf-8)
 add_test(NAME headmath COMMAND k7vr_tests)
+add_executable(k7vr_ini_tests tests/test_ini.cpp src/proxy/ini_bindings.cpp)
+target_compile_options(k7vr_ini_tests PRIVATE /W4 /utf-8)
+add_test(NAME ini COMMAND k7vr_ini_tests)

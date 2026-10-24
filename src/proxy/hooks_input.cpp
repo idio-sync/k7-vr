@@ -204,7 +204,7 @@ void install_input_hook() {
     void* unused;
     patch_import(exe, "USER32.dll", "GetRawInputData", reinterpret_cast<void*>(&hk_GetRawInputData),
                  reinterpret_cast<void**>(&o_GetRawInputData));
-    if (GetPrivateProfileIntW(L"probe", L"leave_desktop_alone", 1, path_in(L"k7vr.ini").c_str())) {
+    if (GetPrivateProfileIntW(L"probe", L"leave_desktop_alone", 0, path_in(L"k7vr.ini").c_str())) {
         patch_import(exe, "USER32.dll", "ClipCursor", reinterpret_cast<void*>(&hk_ClipCursor), &unused);
         patch_import(exe, "USER32.dll", "SetCursorPos", reinterpret_cast<void*>(&hk_SetCursorPos), &unused);
         patch_import(exe, "USER32.dll", "SetForegroundWindow", reinterpret_cast<void*>(&hk_SetForegroundWindow),
@@ -212,7 +212,7 @@ void install_input_hook() {
         patch_import(exe, "USER32.dll", "SetFocus", reinterpret_cast<void*>(&hk_SetFocus), &unused);
         patch_import(exe, "USER32.dll", "GetCursorPos", reinterpret_cast<void*>(&hk_GetCursorPos), &unused);
     }
-    if (GetPrivateProfileIntW(L"probe", L"minimized", 1, path_in(L"k7vr.ini").c_str())) {
+    if (GetPrivateProfileIntW(L"probe", L"minimized", 0, path_in(L"k7vr.ini").c_str())) {
         patch_import(exe, "USER32.dll", "ShowWindow", reinterpret_cast<void*>(&hk_ShowWindow),
                      reinterpret_cast<void**>(&o_ShowWindow));
         patch_import(exe, "USER32.dll", "GetClientRect", reinterpret_cast<void*>(&hk_GetClientRect),

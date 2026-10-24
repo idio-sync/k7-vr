@@ -100,9 +100,9 @@ static HRESULT WINAPI hk_D3DCompile(LPCVOID src, SIZE_T len, LPCSTR name, const 
 
     std::lock_guard lock(g_mx);
     ++g_compiles;
+    // Dumped only when k7vr\shaders exists (the test copy; a normal install doesn't have it).
     std::wstring dump = g_dir + L"\\shaders\\" + file;
     if (GetFileAttributesW(dump.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        CreateDirectoryW((g_dir + L"\\shaders").c_str(), nullptr);
         if (FILE* f = _wfopen(dump.c_str(), L"wb")) {
             fwrite(src, 1, len, f);
             fclose(f);

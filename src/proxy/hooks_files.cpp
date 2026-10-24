@@ -1,4 +1,4 @@
-// Logs the files the game opens (k7vr.ini [probe] log_files=1, default on), to see what a
+// Logs the files the game opens (k7vr.ini [probe] log_files=1, default off), to see what a
 // scene is loading or waiting on.
 #include "common.h"
 
@@ -24,7 +24,7 @@ static HANDLE WINAPI hk_CreateFileA(LPCSTR name, DWORD access, DWORD share, LPSE
 }
 
 void install_file_hooks() {
-    if (!GetPrivateProfileIntW(L"probe", L"log_files", 1, path_in(L"k7vr.ini").c_str())) return;
+    if (!GetPrivateProfileIntW(L"probe", L"log_files", 0, path_in(L"k7vr.ini").c_str())) return;
     HMODULE exe = GetModuleHandleW(nullptr);
     patch_import(exe, "KERNEL32.dll", "CreateFileW", reinterpret_cast<void*>(&hk_CreateFileW),
                  reinterpret_cast<void**>(&o_CreateFileW));

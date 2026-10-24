@@ -63,7 +63,7 @@ static DWORD WINAPI mute_thread(void*) {
 }
 
 void start_audio_mute() {
-    if (!GetPrivateProfileIntW(L"probe", L"mute", 1, path_in(L"k7vr.ini").c_str())) return;
+    if (!GetPrivateProfileIntW(L"probe", L"mute", 0, path_in(L"k7vr.ini").c_str())) return;
     CloseHandle(CreateThread(nullptr, 0, mute_thread, nullptr, 0, nullptr));
 }
 

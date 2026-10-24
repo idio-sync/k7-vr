@@ -1,5 +1,6 @@
-// Points the game's Saved Games folder at k7vr\SavedGames, so the test copy gets its own
-// killer7.ini and save slots and never touches the real ones (or their Steam Cloud sync).
+// Points the game's Saved Games folder at k7vr\SavedGames when that folder exists, so the test
+// copy gets its own killer7.ini and save slots and never touches the real ones (or their Steam
+// Cloud sync). A normal install has no such folder and keeps the player's own saves.
 #include "common.h"
 
 #include <shlobj.h>
@@ -15,7 +16,6 @@ static SHGetKnownFolderPath_t o_SHGetKnownFolderPath;
 static HRESULT WINAPI hk_SHGetKnownFolderPath(REFKNOWNFOLDERID id, DWORD flags, HANDLE token, PWSTR* out) {
     if (IsEqualGUID(id, kSavedGames) && out) {
         std::wstring dir = path_in(L"SavedGames");
-        CreateDirectoryW(dir.c_str(), nullptr);
         size_t bytes = (dir.size() + 1) * sizeof(wchar_t);
         *out = static_cast<PWSTR>(CoTaskMemAlloc(bytes));
         if (!*out) return E_OUTOFMEMORY;
@@ -27,6 +27,11 @@ static HRESULT WINAPI hk_SHGetKnownFolderPath(REFKNOWNFOLDERID id, DWORD flags, 
 }
 
 void install_folder_hook() {
+    const DWORD attr = GetFileAttributesW(path_in(L"SavedGames").c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        logf("Saved Games: the game's own (no k7vr\\SavedGames folder)");
+        return;
+    }
     patch_import(GetModuleHandleW(nullptr), "SHELL32.dll", "SHGetKnownFolderPath",
                  reinterpret_cast<void*>(&hk_SHGetKnownFolderPath), reinterpret_cast<void**>(&o_SHGetKnownFolderPath));
 }
