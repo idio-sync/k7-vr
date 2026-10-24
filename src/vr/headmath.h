@@ -24,6 +24,22 @@ Pose yaw_only(const Pose& p);
 // anchor (the game camera), in metres; `unit_m` is metres per game unit.
 void eye_space_transform(const Pose& eye_in_anchor, float unit_m, float out[12]);
 
+// ---- Aim mode (M4) ----
+// The game's world is right-handed, +y up. Its aim camera looks along
+// (sin yaw cos pitch, sin pitch, cos yaw cos pitch) (radians; probe 2026-10-24).
+
+// World pose of a camera at `eye` looking at `target` (no roll), in the game's units.
+Pose look_at(const float eye[3], const float target[3]);
+
+// The game's aim angles for a world direction.
+void aim_angles(const float dir[3], float* yaw, float* pitch);
+
+// Pose `p` with its translation scaled (metres <-> game units).
+Pose scaled(const Pose& p, float s);
+
+// Shader 3x4 rows of a pose (no unit conversion).
+void pose_rows(const Pose& p, float out[12]);
+
 // Clip-space x and y rows for an off-axis frustum given as tangents of the half-angles in
 // y-up convention (left < 0 < right, bottom < 0 < top), for the game's projection layout where
 // w = -z (camera looks down -z). out_x/out_y are dotted with (x, y, z, 1).

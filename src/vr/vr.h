@@ -11,7 +11,12 @@
 //                               auto (OpenVR: the headset's recommended size x eye_scale;
 //                               sim: unchanged), WxH, or game (unchanged)
 //   eye_scale = 1.0             multiplier on the recommended size for eye_res=auto
+//   destripe = 1                blend the game's alternating 1-pixel columns in the eye and screen images
+//   hand_pitch = 0              degrees the aim direction is tilted up from the controller's -z axis
+//   hand_offset = 0,0,0         grip point in the controller's frame, metres
 #include <d3d11.h>
+
+#include "headmath.h"
 
 namespace k7::vr {
 
@@ -42,11 +47,24 @@ void game_view(float game_xy_ratio, EyeConsts* out);
 // and `screen` is the game's mono image, shown on a larger opaque virtual screen.
 void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud, ID3D11Texture2D* screen);
 
+// What present() sent this frame (0 left, 1 right, 2 screen; sim mode prepares them too), or null.
+ID3D11Texture2D* submitted(int which);
+
 // The size the game's 4:3 render targets should be created at, or false to leave them alone.
 bool eye_resolution(unsigned* width, unsigned* height);
 
 // Aspect (width/height) of the picture inside HUD and screen textures, for the panels.
 void set_content_aspect(float aspect);
+
+// Aim mode (M4). The right controller's pose relative to the seated reference (metres, the
+// anchor's frame), with [vr] hand_pitch / hand_offset applied; false when it isn't tracked.
+// Sim mode: a scripted hand (set_sim_hand).
+bool hand_pose(Pose* out);
+void set_sim_hand(float yaw_deg, float pitch_deg);
+// Rebuilds this frame's head transforms for a game camera at `cam_in_anchor` (metres; rotation
+// and offset from the anchor), so the world stays put while the game camera turns.
+void relock(const Pose& cam_in_anchor, EyeConsts eyes[2]);
+float unit();
 
 void recenter();
 void set_mode(Mode m);  // Off <-> Sim from the command file; OpenVR only from the ini

@@ -62,7 +62,18 @@ struct Requests {
     bool view = false;       // new free-look angles from the game camera
     float yaw = 0, pitch = 0;
 };
+// Our own shaders (entry point "main"), through the real compiler; null on failure (logged).
+ID3DBlob* compile_hlsl(const char* src, const char* target, const char* name);
+
+// Aim mode (aim.cpp).
+bool aim_mode_now();                          // the render camera is the first-person aim camera
+bool aim_camera(float eye[3], float target[3]);  // the render camera's eye and look-at target (world)
+void aim_set(float yaw, float pitch);         // aim angles (radians), velocities zeroed
+bool aim_widen_clamp(float limit_rad);        // the game's pitch limit (36 degrees) -> +-limit
+void set_gun_param(const std::string& name, const float v[3]);  // `gun` command: scale/pivot/clip/converge/hudmask
+
 Requests control_poll();      // once per frame
+void set_capture_snaps(std::vector<unsigned> draws);  // next capture also saves the RT after these draws
 bool fake_pad_enabled();
 void pad_apply(_XINPUT_STATE* state);  // ORs scripted input into player 1's state
 

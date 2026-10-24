@@ -112,7 +112,7 @@ aim controller at RVA `0x46bde8` (VA `0x86bde8`); `1b3a0f`–`1b3b3c` turns it i
 | `+0x108` | aim FOV (44°; copied to the manager and source camera) |
 | `+0x10c` | camera manager pointer |
 | `+0x150` / `+0x154` | aim velocities, decayed into pitch / yaw each frame (`1b3b40`) |
-| `+0x160` | reference yaw; yaw is wrapped to ±π around it |
+| `+0x160` | thought to be a reference yaw; reads ≈0 (see Round 3) |
 
 Writing pitch/yaw (both copies) during aim mode turns the view and reticle; the game clamps
 them (pitch −0.35 settled at −0.25; yaw 3.6 came back as −2.82). There is a small automatic
@@ -125,6 +125,38 @@ Keyboard aim in aim mode is the arrow keys.
 
 **Units:** the held gun sits ~2.5 units in front of the eye, so a unit is roughly 20–30 cm,
 which matches the stereo parallax measurements. IPD in game units ≈ 0.2–0.3 (calibrate).
+
+## Round 3 (2026-10-24): stripes, aim mapping, pitch clamp
+
+**The "vertical scanlines" seen in the headset are in the game's own frame.** Many surfaces
+(lit 3D materials, the point-sprite kanji on the persona cards) come out as alternating
+1-pixel columns: odd columns lose red and green, or alternate black/colour. It is there with
+VR off, with `EnableAA = false`, and in orthographic draws the stereo patch never touches, from
+the very first scene draws on. On a monitor it is invisible because the 1920-wide frame is
+scaled down to the window, which blends each column pair; the headset shows the eye image near
+1:1. The mod now blends it on the way to the headset (horizontal 1-2-1 filter on the eye and
+screen images, `[vr] destripe`, compute shader in `vr.cpp`). Where in the material it comes from
+was not pinned down (the per-draw snapshots — `capture N...` — show it in every lit draw).
+
+**Aim mapping (measured).** The aim camera looks along
+`(sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)` from a fixed aim eye; yaw π is world −z,
+LEFT raises yaw, world is right-handed with +y up. Yaw is **not** clamped: it wraps through
+360° (the earlier "3.6 came back as −2.82" was the wrap). `+0x160` read ≈0 throughout, so it is
+not a reference yaw.
+
+**Pitch clamp.** ±π/5 (36°), applied by `maxss/minss` against two shared `.rdata` constants
+(`0x82c214` = −0.628, `0x82b494` = +0.628) at RVAs `1b0391/1b0399` (the aim controller update,
+`edi+0xc4`) and `1b3c89/1b3c91` (a second camera path, `esi+0x15c`). `+0.628` is also used as a
+multiplier elsewhere (`2292f3`, `25b07b`), so the mod repoints only those four instructions'
+operands at its own limits (`aim_pitch_limit`, default 80°; `aim.cpp`). Verified: 57° up and
+59° down held.
+
+**M4 in sim mode (headless).** With the right hand steering the aim (look-at point
+`aim_converge_m` along the hand ray), the corridor stays still across ±30–60° of aim
+(world lock from the camera manager's eye/target at the first 3D draw), the arm and gun follow
+the hand, the forearm is clipped behind the grip (`gun_clip_z`, an `SV_ClipDistance` on the
+arm/gun draws only), and the game's reticle (centred, full-height lines) is masked out of the
+HUD (`aim_hud_mask`).
 
 ## Driving the game unattended (for later testing)
 

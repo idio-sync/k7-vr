@@ -5,6 +5,7 @@
 
 #include <dxgi1_2.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -114,6 +115,8 @@ static void append_matrix(std::string& s, const char* label, const float* m, int
     s += ']';
 }
 
+constexpr UINT kCaptureTextures = 4;
+
 static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, UINT instances) {
     std::string& s = g_cap.text;
     appendf(s, "%4u %s n=%u", g_draws, kind, count);
@@ -173,6 +176,15 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
     if (cb[1]) appendf(s, " cb1=#%d", id_of(cb[1]));
     for (auto b : cb)
         if (b) b->Release();
+    ID3D11ShaderResourceView* srv[kCaptureTextures] = {};
+    c->PSGetShaderResources(0, kCaptureTextures, srv);
+    for (UINT i = 0; i < kCaptureTextures; ++i) {
+        if (!srv[i]) continue;
+        char label[8];
+        sprintf_s(label, "t%u", i);
+        describe_view(s, label, srv[i]);
+        srv[i]->Release();
+    }
     s += '\n';
 }
 
@@ -220,53 +232,313 @@ static std::vector<uint64_t> g_card_ps;  // pixel shaders of view-dependent effe
 static bool g_card_skip;                 // [vr] card_mode=skip
 static std::unordered_map<ID3D11RasterizerState*, ID3D11RasterizerState*> g_scissor_states;
 
-// Aim mode: the camera manager's eye and look-at target are the aim controller's (RVA 0x46bde8;
-// manager pointer at RVA 0x46fa54). Reads are guarded in case either object isn't there.
-static bool guarded_read(const void* p, void* out, size_t n) {
-    __try {
-        memcpy(out, p, n);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-static bool aim_mode_now() {
-    const uintptr_t exe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    uintptr_t mgr = 0;
-    float m_eye[3], m_tgt[3], a_eye[3], a_tgt[3];
-    if (!guarded_read(reinterpret_cast<void*>(exe + 0x46fa54), &mgr, 4) || !mgr) return false;
-    const uintptr_t aim = exe + 0x46bde8;
-    if (!guarded_read(reinterpret_cast<void*>(mgr + 0x0c), m_eye, 12) ||
-        !guarded_read(reinterpret_cast<void*>(mgr + 0x24), m_tgt, 12) ||
-        !guarded_read(reinterpret_cast<void*>(aim + 0xdc), a_eye, 12) ||
-        !guarded_read(reinterpret_cast<void*>(aim + 0xf4), a_tgt, 12))
-        return false;
-    for (int i = 0; i < 3; ++i)
-        if (fabsf(m_eye[i] - a_eye[i]) > 1e-3f || fabsf(m_tgt[i] - a_tgt[i]) > 1e-3f) return false;
-    return true;
-}
+// ---- Aim mode (M4) ----
+// While the game's first-person aim camera is active:
+//  - the anchor (the player's frame) is the level frame of the aim camera when aiming began, so
+//    the world stays put however the game camera turns (the head transforms are rebuilt against
+//    this frame's camera at its first 3D draw, after the game updated it);
+//  - the right controller steers the game's aim: the camera looks from the aim eye at the point
+//    aim_converge_m along the controller's ray, so shots land where the hand points at that range;
+//  - the first-person arm and gun are moved from the game's aim view into the hand.
+static float g_gun_scale = 0.6f;
+static float g_gun_pivot[3] = {0.45f, -0.9f, -2.5f};  // the gun's grip in the game's aim view (game units)
+static float g_gun_clip_z = -1.5f;                    // the arm is cut off nearer the camera than this
+static float g_aim_converge = 10;                     // metres
+static bool g_anchor_set;
+static vr::Pose g_anchor;                             // world pose (game units) of the player's frame
+static bool g_relocked;                               // this frame's head transforms follow its camera
+static float g_laser_muzzle = 0.15f;                  // the laser starts this far forward of the grip, metres
+static float g_laser_length = 30;                     // metres; [vr] laser_m, 0 = no laser
+static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden in aim mode (the reticle)
+static bool g_laser_depth = true;                     // walls hide the laser (`gun laserdepth 0`: debugging)
+static bool g_laser_ready;                            // g_laser_pose is this frame's
+static vr::Pose g_laser_pose;                         // the hand in the game camera's eye space (game units)
 
 static void init_draw_buffers() {
-    float gun_scale = 0.6f;
-    wchar_t buf[32];
-    GetPrivateProfileStringW(L"vr", L"gun_scale", L"", buf, 32, path_in(L"k7vr.ini").c_str());
-    if (buf[0]) gun_scale = float(_wtof(buf));
-    float pivot[3] = {0.45f, -0.9f, -2.5f};  // near the gun's origin in the game's aim view (game units)
-    GetPrivateProfileStringW(L"vr", L"gun_pivot", L"", buf, 32, path_in(L"k7vr.ini").c_str());
-    if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &pivot[0], &pivot[1], &pivot[2]);
-    // [0]: no transform. [1]: the arm and gun shrunk in place around the pivot.
-    // M4 replaces this with the controller pose.
+    wchar_t buf[64];
+    const std::wstring ini = path_in(L"k7vr.ini");
+    GetPrivateProfileStringW(L"vr", L"gun_scale", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_gun_scale = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"gun_pivot", L"", buf, 64, ini.c_str());
+    if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &g_gun_pivot[0], &g_gun_pivot[1], &g_gun_pivot[2]);
+    GetPrivateProfileStringW(L"vr", L"gun_clip_z", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_gun_clip_z = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_aim_converge = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"laser_m", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_laser_length = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"aim_hud_mask", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_aim_hud_mask = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"aim_pitch_limit", L"80", buf, 64, ini.c_str());
+    const float limit = float(_wtof(buf));
+    if (limit > 36 && limit < 90) aim_widen_clamp(limit * 3.14159265f / 180);
+    // [0]: no transform. [1]: the arm and gun, rewritten each aim-mode frame (until the first,
+    // shrunk in place around the grip).
     const float none[16] = {};
-    const float k = 1 - gun_scale;
-    const float gun[16] = {gun_scale, 0, 0, k * pivot[0], 0, gun_scale, 0, k * pivot[1],
-                           0,         0, gun_scale, k * pivot[2], 1, 0, 0, 0};
+    const float s = g_gun_scale, k = 1 - s;
+    const float gun[16] = {s, 0, 0, k * g_gun_pivot[0], 0, s, 0, k * g_gun_pivot[1], 0, 0, s, k * g_gun_pivot[2],
+                           1, 100, 0, 0};  // not clipped
     D3D11_BUFFER_DESC d{sizeof(gun), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
     D3D11_SUBRESOURCE_DATA i0{none, 0, 0}, i1{gun, 0, 0};
     g_dev->CreateBuffer(&d, &i0, &g_draw_cb[0]);
     g_dev->CreateBuffer(&d, &i1, &g_draw_cb[1]);
     g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
-    logf("stereo: gun scale %g", gun_scale);
+    logf("stereo: gun scale %g, aim converges at %g m", g_gun_scale, g_aim_converge);
+}
+
+void set_gun_param(const std::string& name, const float v[3]) {
+    if (name == "scale") g_gun_scale = v[0];
+    else if (name == "pivot") memcpy(g_gun_pivot, v, sizeof(g_gun_pivot));
+    else if (name == "clip") g_gun_clip_z = v[0];
+    else if (name == "converge") g_aim_converge = v[0];
+    else if (name == "hudmask") g_aim_hud_mask = v[0];
+    else if (name == "laser") g_laser_length = v[0];
+    else if (name == "laserdepth") g_laser_depth = v[0] != 0;
+    else logf("gun: unknown setting '%s'", name.c_str());
+    logf("gun: scale %g pivot %g,%g,%g clip %g converge %g hud mask %g", g_gun_scale, g_gun_pivot[0], g_gun_pivot[1],
+         g_gun_pivot[2], g_gun_clip_z, g_aim_converge, g_aim_hud_mask);
+}
+
+// Frame start, aim mode: point the game's aim where the hand points.
+static void steer_aim() {
+    vr::Pose hand;
+    if (!g_anchor_set || !vr::hand_pose(&hand)) return;
+    // Target point in the anchor frame (metres), then its direction from the aim eye in the world.
+    const float c = g_aim_converge;
+    const float p[3] = {hand.m[0][3] - c * hand.m[0][2], hand.m[1][3] - c * hand.m[1][2], hand.m[2][3] - c * hand.m[2][2]};
+    float d[3];
+    for (int i = 0; i < 3; ++i) d[i] = g_anchor.m[i][0] * p[0] + g_anchor.m[i][1] * p[1] + g_anchor.m[i][2] * p[2];
+    float yaw, pitch;
+    vr::aim_angles(d, &yaw, &pitch);
+    aim_set(yaw, pitch);
+}
+
+// First 3D draw of an aim-mode frame: the game camera is final now. Rebuild both eyes against
+// it, and put the gun in the hand.
+static void relock_aim() {
+    g_relocked = true;
+    float eye[3], tgt[3];
+    if (!g_anchor_set || !aim_camera(eye, tgt)) return;
+    const float u = vr::unit();
+    const vr::Pose cam = vr::compose(vr::inverse(g_anchor), vr::look_at(eye, tgt));  // game units
+    vr::relock(vr::scaled(cam, u), g_eyes);
+    for (int e = 0; e < 2; ++e) g_ctx->UpdateSubresource(g_eye_cb[e], 0, nullptr, &g_eyes[e], 0, 0);
+
+    vr::Pose hand;
+    if (!g_draw_cb[1] || !vr::hand_pose(&hand)) return;
+    // Game aim view -> anchor: the grip goes to the hand, scaled by gun_scale around the grip.
+    const vr::Pose q = vr::compose(vr::inverse(cam), vr::scaled(hand, 1 / u));
+    g_laser_pose = q;
+    g_laser_ready = g_laser_length > 0;
+    const float s = g_gun_scale;
+    float m[16] = {};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) m[i * 4 + j] = q.m[i][j] * s;
+        m[i * 4 + 3] = q.m[i][3] - s * (q.m[i][0] * g_gun_pivot[0] + q.m[i][1] * g_gun_pivot[1] + q.m[i][2] * g_gun_pivot[2]);
+    }
+    m[12] = 1;
+    m[13] = g_gun_clip_z;
+    g_ctx->UpdateSubresource(g_draw_cb[1], 0, nullptr, m, 0, 0);
+}
+
+// ---- The aim laser ----
+// A thin additive beam from the gun's muzzle along the hand's ray, drawn into both eyes' scene
+// targets with the scene's depth (walls hide it), once per aim-mode frame at the first HUD draw.
+// It is projected like the game's own draws: the eye's head transform and x/y rows (slot b12),
+// the z/w rows of the game's last perspective projection and its pixel centre.
+static bool g_laser_done;
+static ID3D11VertexShader* g_laser_vs;
+static ID3D11PixelShader* g_laser_ps;
+static ID3D11Buffer* g_laser_cb;
+static ID3D11RasterizerState* g_laser_rs;
+static ID3D11BlendState* g_laser_bs;
+static ID3D11DepthStencilState* g_laser_ds;
+static ID3D11DepthStencilState* g_laser_ds_off;
+static bool g_laser_failed;
+
+// After projMatrix[4], ambientColor[2], materialColor[2] and five light arrays of 8.
+constexpr UINT kPixelCenterOffset = kProjOffset + (4 + 2 + 2 + 8 * 5) * 16;
+static_assert(kPixelCenterOffset + 16 == 3344, "pixelCenter is the template constants' last register");
+
+static const char kLaserVs[] =
+    "cbuffer Laser : register(b0) { float4 a; float4 b; float4 projz; float4 projw; float4 pc; float4 color; float4 width; };\n"
+    "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; float4 k7_px; float4 k7_py; float4 k7_flags; };\n"
+    "struct V { float4 pos : SV_POSITION; float t : TEXCOORD0; };\n"
+    "float3 eye_of(float4 p) { return float3(dot(k7_head[0], p), dot(k7_head[1], p), dot(k7_head[2], p)); }\n"
+    "V main(uint id : SV_VertexID) {\n"
+    "  float3 A = eye_of(a), B = eye_of(b);\n"
+    "  float3 m = (id < 2) ? A : B;\n"
+    "  float3 side = normalize(cross(B - A, m)) * max(width.x * length(m), width.y);\n"
+    "  float4 p = float4(m + ((id & 1) ? side : -side), 1);\n"
+    "  V o;\n"
+    "  o.pos = float4(dot(p, k7_px), dot(p, k7_py), dot(p, projz), dot(p, projw));\n"
+    "  o.pos.z = o.pos.w * pc.w - o.pos.z * pc.z;\n"
+    "  o.pos.xy -= o.pos.w * pc.xy;\n"
+    "  o.t = (id < 2) ? 0 : 1;\n"
+    "  return o;\n"
+    "}\n";
+static const char kLaserPs[] =
+    "cbuffer Laser : register(b0) { float4 a; float4 b; float4 projz; float4 projw; float4 pc; float4 color; float4 width; };\n"
+    "float4 main(float4 pos : SV_POSITION, float t : TEXCOORD0) : SV_Target { return float4(color.rgb * (1 - 0.8 * t), 0); }\n";
+
+static bool laser_init() {
+    if (g_laser_vs) return true;
+    if (g_laser_failed) return false;
+    g_laser_failed = true;
+    ID3DBlob* vs = compile_hlsl(kLaserVs, "vs_5_0", "k7vr_laser_vs");
+    ID3DBlob* ps = compile_hlsl(kLaserPs, "ps_5_0", "k7vr_laser_ps");
+    if (vs && ps && SUCCEEDED(g_dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_laser_vs)) &&
+        SUCCEEDED(g_dev->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &g_laser_ps))) {
+        D3D11_BUFFER_DESC bd{7 * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        D3D11_RASTERIZER_DESC rd{D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.f, 0.f, TRUE, FALSE, FALSE, FALSE};
+        D3D11_BLEND_DESC blend{};
+        blend.RenderTarget[0] = {TRUE, D3D11_BLEND_ONE, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_ZERO,
+                                 D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL};
+        // The game clears depth to 0 and keeps the nearest = largest value.
+        D3D11_DEPTH_STENCIL_DESC dd{TRUE, D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_COMPARISON_GREATER_EQUAL};
+        D3D11_DEPTH_STENCIL_DESC off{FALSE, D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_COMPARISON_ALWAYS};
+        if (SUCCEEDED(g_dev->CreateBuffer(&bd, nullptr, &g_laser_cb)) && SUCCEEDED(g_dev->CreateRasterizerState(&rd, &g_laser_rs)) &&
+            SUCCEEDED(g_dev->CreateBlendState(&blend, &g_laser_bs)) &&
+            SUCCEEDED(g_dev->CreateDepthStencilState(&dd, &g_laser_ds)) &&
+            SUCCEEDED(g_dev->CreateDepthStencilState(&off, &g_laser_ds_off)))
+            g_laser_failed = false;
+    }
+    if (vs) vs->Release();
+    if (ps) ps->Release();
+    if (g_laser_failed) logf("aim: laser unavailable");
+    return !g_laser_failed;
+}
+
+template <typename V>
+static V* twin_view(V* view, bool create);
+
+// Into the bound scene target (left eye) and its twin (right eye).
+static void draw_laser(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv) {
+    if (g_laser_done) return;
+    static int skipped;
+    if (!g_laser_ready || !rtv || !dsv || !laser_init()) {
+        if (skipped++ < 3) logf("laser: skipped (ready %d rtv %p dsv %p)", g_laser_ready, rtv, dsv);
+        return;
+    }
+    g_laser_done = true;
+    // The scene draw's projection z/w rows and pixel centre.
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (it == g_cb.end() || it->second.size() < kPixelCenterOffset + 16) {
+        if (skipped++ < 3) logf("laser: no shadow of the scene constants");
+        return;
+    }
+    const float* f = reinterpret_cast<const float*>(it->second.data());
+    struct {
+        float a[4], b[4], projz[4], projw[4], pc[4], color[4], width[4];
+    } c{};
+    const float u = vr::unit();
+    const vr::Pose& q = g_laser_pose;
+    const float d0 = g_laser_muzzle / u, d1 = g_laser_length / u;
+    for (int i = 0; i < 3; ++i) {
+        c.a[i] = q.m[i][3] - d0 * q.m[i][2];
+        c.b[i] = q.m[i][3] - d1 * q.m[i][2];
+    }
+    c.a[3] = c.b[3] = 1;
+    // The bound constants are the HUD's (orthographic): depth rows from the scene's perspective
+    // projection, the pixel centre (per render target) from these.
+    memcpy(c.projz, g_last_proj + 8, 16);
+    memcpy(c.projw, g_last_proj + 12, 16);
+    memcpy(c.pc, f + kPixelCenterOffset / 4, 16);
+    const float color[4] = {1.0f, 0.12f, 0.08f, 1};
+    memcpy(c.color, color, 16);
+    c.width[0] = 0.0012f;          // half-width per unit of distance (constant angular size)
+    c.width[1] = 0.003f / u;       // at least 3 mm
+    g_ctx->UpdateSubresource(g_laser_cb, 0, nullptr, &c, 0, 0);
+    static int logged;
+    if (logged++ < 3) {
+        // Where the beam starts and ends in the left eye (clip space), as the shader computes it.
+        auto clip = [&](const float* p, float out[4]) {
+            float e[4] = {0, 0, 0, 1};
+            for (int i = 0; i < 3; ++i)
+                e[i] = g_eyes[0].head[i * 4] * p[0] + g_eyes[0].head[i * 4 + 1] * p[1] + g_eyes[0].head[i * 4 + 2] * p[2] +
+                       g_eyes[0].head[i * 4 + 3];
+            auto dot4 = [&](const float* r) { return r[0] * e[0] + r[1] * e[1] + r[2] * e[2] + r[3] * e[3]; };
+            out[0] = dot4(g_eyes[0].px), out[1] = dot4(g_eyes[0].py), out[2] = dot4(c.projz), out[3] = dot4(c.projw);
+            out[2] = out[3] * c.pc[3] - out[2] * c.pc[2];
+        };
+        float ca[4], cb[4];
+        clip(c.a, ca);
+        clip(c.b, cb);
+        logf("laser: a %.2f,%.2f,%.2f b %.2f,%.2f,%.2f -> clip a %.3f,%.3f,%.3f w%.3f b %.3f,%.3f,%.3f w%.3f pc %g,%g,%g,%g", c.a[0],
+             c.a[1], c.a[2], c.b[0], c.b[1], c.b[2], ca[0], ca[1], ca[2], ca[3], cb[0], cb[1], cb[2], cb[3], c.pc[0], c.pc[1],
+             c.pc[2], c.pc[3]);
+    }
+
+    // Save what we change.
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    ID3D11InputLayout* il = nullptr;
+    g_ctx->IAGetInputLayout(&il);
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    ID3D11GeometryShader* gs = nullptr;
+    g_ctx->VSGetShader(&vs, nullptr, nullptr);
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    g_ctx->GSGetShader(&gs, nullptr, nullptr);
+    ID3D11Buffer *vcb = nullptr, *pcb = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &vcb);
+    g_ctx->PSGetConstantBuffers(0, 1, &pcb);
+    ID3D11RasterizerState* rs = nullptr;
+    g_ctx->RSGetState(&rs);
+    ID3D11BlendState* bs = nullptr;
+    FLOAT factor[4];
+    UINT mask;
+    g_ctx->OMGetBlendState(&bs, factor, &mask);
+    ID3D11DepthStencilState* ds = nullptr;
+    UINT ref;
+    g_ctx->OMGetDepthStencilState(&ds, &ref);
+    ID3D11RenderTargetView* old_rtv[kMaxTargets] = {};
+    ID3D11DepthStencilView* old_dsv = nullptr;
+    g_ctx->OMGetRenderTargets(kMaxTargets, old_rtv, &old_dsv);
+
+    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    g_ctx->IASetInputLayout(nullptr);
+    g_ctx->VSSetShader(g_laser_vs, nullptr, 0);
+    g_ctx->PSSetShader(g_laser_ps, nullptr, 0);
+    g_ctx->GSSetShader(nullptr, nullptr, 0);
+    g_ctx->VSSetConstantBuffers(0, 1, &g_laser_cb);
+    g_ctx->PSSetConstantBuffers(0, 1, &g_laser_cb);
+    g_ctx->RSSetState(g_laser_rs);
+    const FLOAT zero[4] = {};
+    g_ctx->OMSetBlendState(g_laser_bs, zero, 0xffffffff);
+    g_ctx->OMSetDepthStencilState(g_laser_depth ? g_laser_ds : g_laser_ds_off, 0);
+    for (int eye = 0; eye < 2; ++eye) {
+        ID3D11RenderTargetView* r = eye == 0 ? rtv : twin_view(rtv, false);
+        ID3D11DepthStencilView* d = eye == 0 ? dsv : twin_view(dsv, false);
+        if (!r || !d) continue;
+        g_ctx->OMSetRenderTargets(1, &r, d);
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[eye]);
+        g_ctx->Draw(4, 0);
+    }
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+
+    g_ctx->OMSetRenderTargets(kMaxTargets, old_rtv, old_dsv);
+    g_ctx->OMSetDepthStencilState(ds, ref);
+    g_ctx->OMSetBlendState(bs, factor, mask);
+    g_ctx->RSSetState(rs);
+    g_ctx->VSSetConstantBuffers(0, 1, &vcb);
+    g_ctx->PSSetConstantBuffers(0, 1, &pcb);
+    g_ctx->GSSetShader(gs, nullptr, 0);
+    g_ctx->PSSetShader(ps, nullptr, 0);
+    g_ctx->VSSetShader(vs, nullptr, 0);
+    g_ctx->IASetInputLayout(il);
+    g_ctx->IASetPrimitiveTopology(topo);
+    for (auto v : old_rtv)
+        if (v) v->Release();
+    for (IUnknown* p : {static_cast<IUnknown*>(old_dsv), static_cast<IUnknown*>(ds), static_cast<IUnknown*>(bs),
+                        static_cast<IUnknown*>(rs), static_cast<IUnknown*>(pcb), static_cast<IUnknown*>(vcb),
+                        static_cast<IUnknown*>(gs), static_cast<IUnknown*>(ps), static_cast<IUnknown*>(vs),
+                        static_cast<IUnknown*>(il)})
+        if (p) p->Release();
 }
 
 // Before the game draws a frame: both eyes' transforms and projections (waits for headset
@@ -275,11 +547,20 @@ static void set_eye_offsets() {
     if (!g_eye_cb[0] || !g_eye_cb[1]) return;
     const bool aim = vr::stereo() && aim_mode_now();
     if (aim != g_aim_mode) logf("stereo: aim mode %s", aim ? "on" : "off");
+    if (aim && !g_aim_mode) {  // aiming began: the player's frame is the aim camera, levelled
+        float eye[3], tgt[3];
+        g_anchor_set = aim_camera(eye, tgt);
+        if (g_anchor_set) g_anchor = vr::yaw_only(vr::look_at(eye, tgt));
+    }
+    if (!aim) g_anchor_set = false;
     g_aim_mode = aim;
     g_gun_run = 0;
+    g_relocked = false;
+    g_laser_ready = g_laser_done = false;
     if (g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
     vr::begin_frame(ratio, g_eyes);
+    if (aim) steer_aim();
     for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &g_eyes[eye], 0, 0);
     if (g_gv_cb) {
         vr::EyeConsts gv;
@@ -496,6 +777,32 @@ static void draw_hud(DrawFn draw) {
     if (bs) bs->Release();
 }
 
+// Draws once per scissor rectangle.
+template <typename DrawFn>
+static void draw_in_rects(const D3D11_RECT* rects, int n, DrawFn draw) {
+    ID3D11RasterizerState* rs = nullptr;
+    g_ctx->RSGetState(&rs);
+    ID3D11RasterizerState*& scissor_rs = g_scissor_states[rs];
+    if (!scissor_rs) {
+        D3D11_RASTERIZER_DESC rd{D3D11_FILL_SOLID, D3D11_CULL_BACK, FALSE, 0, 0.f, 0.f, TRUE, FALSE, FALSE, FALSE};
+        if (rs) rs->GetDesc(&rd);
+        rd.ScissorEnable = TRUE;
+        g_dev->CreateRasterizerState(&rd, &scissor_rs);
+    }
+    D3D11_RECT old[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    UINT nold = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    g_ctx->RSGetScissorRects(&nold, old);
+    g_ctx->RSSetState(scissor_rs);
+    for (int i = 0; i < n; ++i) {
+        if (rects[i].right <= rects[i].left || rects[i].bottom <= rects[i].top) continue;
+        g_ctx->RSSetScissorRects(1, &rects[i]);
+        draw();
+    }
+    g_ctx->RSSetState(rs);
+    g_ctx->RSSetScissorRects(nold, nold ? old : nullptr);
+    if (rs) rs->Release();
+}
+
 // Draws with a scissor limited to where the game camera's (intended) frustum lands in `eye`.
 template <typename DrawFn>
 static void draw_scissored(int eye, DrawFn draw) {
@@ -513,26 +820,27 @@ static void draw_scissored(int eye, DrawFn draw) {
     vr::frustum_scissor(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, tan_y * ratio, tan_y, int(vp.Width),
                         int(vp.Height), r);
     if (r[2] <= r[0] || r[3] <= r[1]) return;  // the card's view is entirely outside this eye
-    ID3D11RasterizerState* rs = nullptr;
-    g_ctx->RSGetState(&rs);
-    ID3D11RasterizerState*& scissor_rs = g_scissor_states[rs];
-    if (!scissor_rs) {
-        D3D11_RASTERIZER_DESC rd{D3D11_FILL_SOLID, D3D11_CULL_BACK, FALSE, 0, 0.f, 0.f, TRUE, FALSE, FALSE, FALSE};
-        if (rs) rs->GetDesc(&rd);
-        rd.ScissorEnable = TRUE;
-        g_dev->CreateRasterizerState(&rd, &scissor_rs);
-    }
-    D3D11_RECT old[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-    UINT nold = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-    g_ctx->RSGetScissorRects(&nold, old);
     const D3D11_RECT rect{LONG(vp.TopLeftX) + r[0], LONG(vp.TopLeftY) + r[1], LONG(vp.TopLeftX) + r[2],
                           LONG(vp.TopLeftY) + r[3]};
-    g_ctx->RSSetScissorRects(1, &rect);
-    g_ctx->RSSetState(scissor_rs);
-    draw();
-    g_ctx->RSSetState(rs);
-    g_ctx->RSSetScissorRects(nold, nold ? old : nullptr);
-    if (rs) rs->Release();
+    draw_in_rects(&rect, 1, draw);
+}
+
+// Aim mode: the HUD without its centre band, where the game's reticle is (centred, full height;
+// the controller's laser replaces it). [vr] aim_hud_mask = band width as a fraction, 0 = keep.
+template <typename DrawFn>
+static void draw_hud_masked(DrawFn draw) {
+    D3D11_VIEWPORT vp;
+    UINT nvp = 1;
+    g_ctx->RSGetViewports(&nvp, &vp);
+    if (!g_aim_mode || g_aim_hud_mask <= 0 || nvp == 0) {
+        draw();
+        return;
+    }
+    const LONG x0 = LONG(vp.TopLeftX), y0 = LONG(vp.TopLeftY), y1 = LONG(vp.TopLeftY + vp.Height);
+    const LONG band_l = LONG(vp.TopLeftX + vp.Width * (1 - g_aim_hud_mask) / 2);
+    const LONG band_r = LONG(vp.TopLeftX + vp.Width * (1 + g_aim_hud_mask) / 2);
+    const D3D11_RECT rects[2] = {{x0, y0, band_l, y1}, {band_r, y0, LONG(vp.TopLeftX + vp.Width), y1}};
+    draw_in_rects(rects, 2, draw);
 }
 
 static void note_final_source() {
@@ -744,6 +1052,7 @@ static void draw_stereo(DrawFn draw) {
     }
 
     const int kind = draw_kind();
+    if (kind == 1 && g_aim_mode && !g_relocked) relock_aim();
     bool scene = false;
     if (dsv) {
         D3D11_TEXTURE2D_DESC rd, dd;
@@ -767,8 +1076,11 @@ static void draw_stereo(DrawFn draw) {
     // scene. Untextured triangle quads (dims, fades, clears) and screen-image effects stay per eye.
     if (scene && kind == 2 && g_frame_3d && !eye_image && (pixel_shader_textured() || points_or_lines()) &&
         hud_target_like(rtv[0])) {  // once, into the overlay
+        // The laser goes in after the whole scene (it doesn't write depth, so later draws would
+        // cover it) and before the HUD.
+        if (g_aim_mode) draw_laser(rtv[0], dsv);
         g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
-        draw_hud(draw);
+        draw_hud([&] { draw_hud_masked(draw); });
         g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
         draw_game_view(draw, rtv, dsv, scale);
         release_targets();
@@ -934,28 +1246,70 @@ static void before_draw(const char* kind, UINT count, UINT instances) {
     ++g_draws;
 }
 
+// `capture N...`: the render target after draw N, as capture_NNN_dNNNN.png.
+static std::vector<unsigned> g_snaps;
+void set_capture_snaps(std::vector<unsigned> draws) { g_snaps = std::move(draws); }
+static void save_texture(ID3D11Texture2D* tex, const std::wstring& path, bool alpha_only);
+
+static void after_draw() {
+    if (!g_cap.active || g_snaps.empty()) return;
+    const unsigned n = g_draws - 1;
+    if (std::find(g_snaps.begin(), g_snaps.end(), n) == g_snaps.end()) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    g_ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return;
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        wchar_t name[64];
+        swprintf(name, 64, L"capture_%03u_d%04u.png", g_cap.index, n);
+        save_texture(static_cast<ID3D11Texture2D*>(res), path_in(name), false);
+    }
+    res->Release();
+    rtv->Release();
+    // ...and the textures it sampled (formats save_texture can't convert are skipped).
+    ID3D11ShaderResourceView* srv[kCaptureTextures] = {};
+    g_ctx->PSGetShaderResources(0, kCaptureTextures, srv);
+    for (UINT i = 0; i < kCaptureTextures; ++i) {
+        if (!srv[i]) continue;
+        D3D11_TEXTURE2D_DESC d;
+        if (ID3D11Texture2D* tex = texture_of(srv[i], &d)) {
+            wchar_t name[64];
+            swprintf(name, 64, L"capture_%03u_d%04u_t%u.png", g_cap.index, n, i);
+            save_texture(tex, path_in(name), false);
+        }
+        srv[i]->Release();
+    }
+}
+
 // ---- Context hooks (installed in the stand-in's table; `c` is the stand-in) ----
 
 static void STDMETHODCALLTYPE w_DrawIndexed(ID3D11DeviceContext* c, UINT count, UINT start, INT base) {
     before_draw("DrawIndexed", count, 1);
     draw_stereo([&] { real_of(c)->DrawIndexed(count, start, base); });
+    after_draw();
 }
 
 static void STDMETHODCALLTYPE w_Draw(ID3D11DeviceContext* c, UINT count, UINT start) {
     before_draw("Draw", count, 1);
     draw_stereo([&] { real_of(c)->Draw(count, start); });
+    after_draw();
 }
 
 static void STDMETHODCALLTYPE w_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT count, UINT inst, UINT start,
                                                      INT base, UINT start_inst) {
     before_draw("DrawIndexedInstanced", count, inst);
     draw_stereo([&] { real_of(c)->DrawIndexedInstanced(count, inst, start, base, start_inst); });
+    after_draw();
 }
 
 static void STDMETHODCALLTYPE w_DrawInstanced(ID3D11DeviceContext* c, UINT count, UINT inst, UINT start,
                                               UINT start_inst) {
     before_draw("DrawInstanced", count, inst);
     draw_stereo([&] { real_of(c)->DrawInstanced(count, inst, start, start_inst); });
+    after_draw();
 }
 
 static HRESULT STDMETHODCALLTYPE w_Map(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3D11_MAP type,
@@ -1352,11 +1706,11 @@ static void end_frame(IDXGISwapChain* sc) {
         if (g_pair) {
             g_pair = false;
             wchar_t name[64];
-            if (left) {
+            if (left) {  // as sent to the headset (de-striped); scene_L/R below are the game's targets
                 swprintf(name, 64, L"pair_%03u_L.png", g_pair_index);
-                save_texture(left, path_in(name));
+                save_texture(vr::submitted(0) ? vr::submitted(0) : left, path_in(name));
                 swprintf(name, 64, L"pair_%03u_R.png", g_pair_index);
-                save_texture(right, path_in(name));
+                save_texture(vr::submitted(1) ? vr::submitted(1) : right, path_in(name));
             }
             if (g_scene_tex && left) {
                 swprintf(name, 64, L"pair_%03u_scene_L.png", g_pair_index);
@@ -1374,7 +1728,7 @@ static void end_frame(IDXGISwapChain* sc) {
             }
             if (screen) {
                 swprintf(name, 64, L"pair_%03u_screen.png", g_pair_index);
-                save_texture(screen, path_in(name));
+                save_texture(vr::submitted(2) ? vr::submitted(2) : screen, path_in(name));
             }
             logf("pair %u written (%s frame%s)", g_pair_index++, g_frame_3d ? "3D" : "2D",
                  g_final[1] || !left ? "" : ", right eye had no twin");

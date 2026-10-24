@@ -17,9 +17,16 @@ static float g_unit = 0.25f;
 static float g_ipd = 0.064f;
 static float g_sim_fov = 100;
 static float g_inflate = 150;
+static bool g_destripe = true;
 static float g_sim_yaw, g_sim_pitch;  // degrees
 static bool g_recenter = true;
 static Pose g_reference = identity();
+static Pose g_rel = identity();           // this frame's head relative to the reference
+static Pose g_eye_to_head[2] = {identity(), identity()};
+static Pose g_hand = identity();          // right controller relative to the reference (hand_pitch/offset applied)
+static bool g_hand_valid;
+static Pose g_hand_adjust = identity();   // [vr] hand_pitch, hand_offset
+static float g_sim_hand_yaw, g_sim_hand_pitch;
 
 static ID3D11Device* g_dev;
 static ID3D11DeviceContext* g_ctx;
@@ -74,6 +81,15 @@ void init(ID3D11Device* device, ID3D11DeviceContext* context) {
     g_ipd = ini_float(L"ipd_m", g_ipd);
     g_sim_fov = ini_float(L"sim_fov", g_sim_fov);
     g_inflate = ini_float(L"fov_inflate", g_inflate);
+    g_destripe = ini_float(L"destripe", 1) != 0;
+    {
+        float off[3] = {};
+        wchar_t buf[64];
+        GetPrivateProfileStringW(L"vr", L"hand_offset", L"", buf, 64, path_in(L"k7vr.ini").c_str());
+        if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &off[0], &off[1], &off[2]);
+        g_hand_adjust = compose(translation(off[0], off[1], off[2]),
+                                rotation_yaw_pitch(0, ini_float(L"hand_pitch", 0) * 3.14159265f / 180));
+    }
     wchar_t m[32];
     GetPrivateProfileStringW(L"vr", L"mode", L"off", m, 32, path_in(L"k7vr.ini").c_str());
     if (_wcsicmp(m, L"openvr") == 0) {
@@ -120,6 +136,21 @@ void set_mode(Mode m) {
 }
 
 void recenter() { g_recenter = true; }
+float unit() { return g_unit; }
+
+bool hand_pose(Pose* out) {
+    *out = g_hand;
+    return g_hand_valid;
+}
+
+void set_sim_hand(float yaw_deg, float pitch_deg) { g_sim_hand_yaw = yaw_deg, g_sim_hand_pitch = pitch_deg; }
+
+void relock(const Pose& cam_in_anchor, EyeConsts eyes[2]) {
+    if (g_mode == Mode::Off) return;
+    const Pose to_cam = inverse(cam_in_anchor);
+    for (int eye = 0; eye < 2; ++eye)
+        eye_space_transform(compose(to_cam, compose(g_rel, g_eye_to_head[eye])), g_unit, eyes[eye].head);
+}
 void set_sim_view(float yaw_deg, float pitch_deg) { g_sim_yaw = yaw_deg, g_sim_pitch = pitch_deg; }
 void set_ipd(float metres) { g_ipd = metres; }
 void set_unit(float metres_per_unit) { g_unit = metres_per_unit; }
@@ -153,13 +184,21 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
     }
 
     Pose head;
-    Pose eye_to_head[2];
+    Pose* eye_to_head = g_eye_to_head;
+    Pose hand = identity();
+    g_hand_valid = false;
     if (g_mode == Mode::OpenVR) {
         ::vr::TrackedDevicePose_t poses[::vr::k_unMaxTrackedDeviceCount];
         ::vr::VRCompositor()->WaitGetPoses(poses, ::vr::k_unMaxTrackedDeviceCount, nullptr, 0);
         poll_controllers(g_system);
         const auto& hmd = poses[::vr::k_unTrackedDeviceIndex_Hmd];
         head = hmd.bPoseIsValid ? from_openvr(hmd.mDeviceToAbsoluteTracking) : identity();
+        const ::vr::TrackedDeviceIndex_t right =
+            g_system->GetTrackedDeviceIndexForControllerRole(::vr::TrackedControllerRole_RightHand);
+        if (right < ::vr::k_unMaxTrackedDeviceCount && poses[right].bPoseIsValid) {
+            hand = from_openvr(poses[right].mDeviceToAbsoluteTracking);
+            g_hand_valid = true;
+        }
         for (int eye = 0; eye < 2; ++eye) {
             eye_to_head[eye] = from_openvr(g_system->GetEyeToHeadTransform(::vr::EVREye(eye)));
             const ::vr::HmdMatrix44_t p = g_system->GetProjectionMatrix(::vr::EVREye(eye), 0.1f, 100.f);
@@ -175,6 +214,10 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
             eye_to_head[eye] = translation(eye == 0 ? -g_ipd / 2 : g_ipd / 2, 0, 0);
             symmetric_rows(tanf(g_sim_fov * d2r / 2), game_xy_ratio, eyes[eye]);
         }
+        // A right hand held low and forward, pointing where set_sim_hand says.
+        hand = compose(translation(0.15f, -0.25f, -0.35f),
+                       rotation_yaw_pitch(g_sim_hand_yaw * d2r, g_sim_hand_pitch * d2r));
+        g_hand_valid = true;
     }
 
     if (g_recenter) {
@@ -182,14 +225,22 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
         g_recenter = false;
         logf("vr: recentred");
     }
-    const Pose rel = compose(inverse(g_reference), head);  // head relative to the seated reference
+    g_rel = compose(inverse(g_reference), head);  // head relative to the seated reference
+    if (g_hand_valid) {
+        // Sim hands are already relative to the reference's origin.
+        g_hand = g_mode == Mode::OpenVR ? compose(inverse(g_reference), hand) : hand;
+        g_hand = compose(g_hand, g_hand_adjust);
+    }
     for (int eye = 0; eye < 2; ++eye) {
-        eye_space_transform(compose(rel, eye_to_head[eye]), g_unit, eyes[eye].head);
+        eye_space_transform(compose(g_rel, eye_to_head[eye]), g_unit, eyes[eye].head);
         eyes[eye].flags[0] = 1;
     }
 }
 
-// Our own texture shaped like `like` (shader-resource only), recreated when the shape changes.
+static bool uav_capable(DXGI_FORMAT f);
+
+// Our own texture shaped like `like` (shader resource, plus UAV for de-striping when the format
+// allows), recreated when the shape changes.
 static bool ensure_like(ID3D11Texture2D*& t, ID3D11Texture2D* like) {
     D3D11_TEXTURE2D_DESC d;
     like->GetDesc(&d);
@@ -204,7 +255,7 @@ static bool ensure_like(ID3D11Texture2D*& t, ID3D11Texture2D* like) {
     d.ArraySize = 1;
     d.SampleDesc = {1, 0};
     d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (uav_capable(d.Format) ? D3D11_BIND_UNORDERED_ACCESS : 0);
     d.CPUAccessFlags = 0;
     d.MiscFlags = 0;
     if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &t))) return false;
@@ -222,6 +273,90 @@ static ID3D11Texture2D* black_texture() {
         g_dev->CreateTexture2D(&d, &init, &black);
     }
     return black;
+}
+
+// De-striping: the game draws many surfaces as alternating 1-pixel columns (its 1920-wide frame
+// is meant to be scaled down to the window, which blends each column pair). The headset shows
+// the eye images near 1:1, where the columns read as fine vertical lines, so they're blended here
+// with a horizontal 1-2-1 filter on the way to the headset ([vr] destripe=0 turns it off).
+static ID3D11ComputeShader* g_destripe_cs;
+static bool g_destripe_failed;
+
+static const char kDestripeHlsl[] =
+    "Texture2D<float4> src : register(t0);\n"
+    "RWTexture2D<float4> dst : register(u0);\n"
+    "[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {\n"
+    "  uint w, h; src.GetDimensions(w, h);\n"
+    "  if (id.x >= w || id.y >= h) return;\n"
+    "  int x = int(id.x), y = int(id.y);\n"
+    "  dst[id.xy] = 0.5f * src[int2(x, y)] + 0.25f * (src[int2(max(x - 1, 0), y)] + src[int2(min(x + 1, int(w) - 1), y)]);\n"
+    "}\n";
+
+static bool destripe_shader() {
+    if (g_destripe_cs) return true;
+    if (g_destripe_failed) return false;
+    g_destripe_failed = true;  // until it works
+    if (ID3DBlob* code = compile_hlsl(kDestripeHlsl, "cs_5_0", "k7vr_destripe")) {
+        if (SUCCEEDED(g_dev->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_destripe_cs)))
+            g_destripe_failed = false;
+        code->Release();
+    }
+    return !g_destripe_failed;
+}
+
+static bool uav_capable(DXGI_FORMAT f) {
+    UINT support = 0;
+    return SUCCEEDED(g_dev->CheckFormatSupport(f, &support)) &&
+           (support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW);
+}
+
+// dst (made by ensure_like with UAV binding) = filtered src. False: caller copies instead.
+static bool destripe(ID3D11Texture2D* src, ID3D11Texture2D* dst) {
+    if (!g_destripe || !destripe_shader()) return false;
+    D3D11_TEXTURE2D_DESC sd, dd;
+    src->GetDesc(&sd);
+    dst->GetDesc(&dd);
+    if (!(sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) || sd.SampleDesc.Count != 1 ||
+        !(dd.BindFlags & D3D11_BIND_UNORDERED_ACCESS))
+        return false;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11UnorderedAccessView* uav = nullptr;
+    D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+    svd.Format = sd.Format;
+    svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    svd.Texture2D.MipLevels = 1;
+    bool ok = SUCCEEDED(g_dev->CreateShaderResourceView(src, &svd, &srv)) &&
+              SUCCEEDED(g_dev->CreateUnorderedAccessView(dst, nullptr, &uav));
+    if (ok) {
+        // Keep the game's compute state as it was.
+        ID3D11ComputeShader* old_cs = nullptr;
+        ID3D11ShaderResourceView* old_srv = nullptr;
+        ID3D11UnorderedAccessView* old_uav = nullptr;
+        g_ctx->CSGetShader(&old_cs, nullptr, nullptr);
+        g_ctx->CSGetShaderResources(0, 1, &old_srv);
+        g_ctx->CSGetUnorderedAccessViews(0, 1, &old_uav);
+        g_ctx->CSSetShader(g_destripe_cs, nullptr, 0);
+        g_ctx->CSSetShaderResources(0, 1, &srv);
+        g_ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        g_ctx->Dispatch((sd.Width + 7) / 8, (sd.Height + 7) / 8, 1);
+        ID3D11UnorderedAccessView* none = nullptr;
+        g_ctx->CSSetUnorderedAccessViews(0, 1, old_uav ? &old_uav : &none, nullptr);
+        g_ctx->CSSetShaderResources(0, 1, &old_srv);
+        g_ctx->CSSetShader(old_cs, nullptr, 0);
+        if (old_cs) old_cs->Release();
+        if (old_srv) old_srv->Release();
+        if (old_uav) old_uav->Release();
+    }
+    if (srv) srv->Release();
+    if (uav) uav->Release();
+    return ok;
+}
+
+// Copy of `src` in `dst` (recreated to match), de-striped when possible.
+static bool prepare(ID3D11Texture2D*& dst, ID3D11Texture2D* src) {
+    if (!ensure_like(dst, src)) return false;
+    if (!destripe(src, dst)) g_ctx->CopySubresourceRegion(dst, 0, 0, 0, 0, src, 0, nullptr);
+    return true;
 }
 
 static ::vr::HmdMatrix34_t to_openvr(const Pose& p) {
@@ -262,8 +397,10 @@ static void update_panel(Panel& p, ID3D11Texture2D* src) {
             overlay->SetOverlayFlag(p.handle, ::vr::VROverlayFlags_IsPremultiplied, true);
         overlay->SetOverlayWidthInMeters(p.handle, p.width_m);
     }
-    if (!ensure_like(p.copy, src)) return;
-    g_ctx->CopySubresourceRegion(p.copy, 0, 0, 0, 0, src, 0, nullptr);
+    if (src != p.copy) {
+        if (!ensure_like(p.copy, src)) return;
+        g_ctx->CopySubresourceRegion(p.copy, 0, 0, 0, 0, src, 0, nullptr);
+    }
     D3D11_TEXTURE2D_DESC d;
     src->GetDesc(&d);  // the picture inside is 4:3 even when the texture was resized for the eyes
     overlay->SetOverlayTexelAspect(p.handle, g_content_aspect * float(d.Height) / float(d.Width));
@@ -274,15 +411,21 @@ static void update_panel(Panel& p, ID3D11Texture2D* src) {
     if (!p.shown) overlay->ShowOverlay(p.handle), p.shown = true;
 }
 
+static ID3D11Texture2D* g_screen_tex;
+static ID3D11Texture2D* g_submitted[3];  // this frame's left, right, screen as sent (diagnostics)
+
+ID3D11Texture2D* submitted(int which) { return which >= 0 && which < 3 ? g_submitted[which] : nullptr; }
+
 void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud, ID3D11Texture2D* screen) {
-    if (g_mode != Mode::OpenVR) return;
+    if (g_mode == Mode::Off) return;
     ID3D11Texture2D* eyes[2] = {black_texture(), black_texture()};
-    if (left && right && ensure_like(g_eye_tex[0], left) && ensure_like(g_eye_tex[1], right)) {
-        g_ctx->CopySubresourceRegion(g_eye_tex[0], 0, 0, 0, 0, left, 0, nullptr);
-        g_ctx->CopySubresourceRegion(g_eye_tex[1], 0, 0, 0, 0, right, 0, nullptr);
-        eyes[0] = g_eye_tex[0];
-        eyes[1] = g_eye_tex[1];
+    g_submitted[0] = g_submitted[1] = g_submitted[2] = nullptr;
+    if (left && right && prepare(g_eye_tex[0], left) && prepare(g_eye_tex[1], right)) {
+        eyes[0] = g_submitted[0] = g_eye_tex[0];
+        eyes[1] = g_submitted[1] = g_eye_tex[1];
     }
+    if (screen && prepare(g_screen_tex, screen)) screen = g_submitted[2] = g_screen_tex;
+    if (g_mode != Mode::OpenVR) return;  // sim: prepared for the pair captures only
     for (int eye = 0; eye < 2; ++eye) {
         ::vr::Texture_t tex{eyes[eye], ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
         const ::vr::EVRCompositorError e = ::vr::VRCompositor()->Submit(::vr::EVREye(eye), &tex);

@@ -43,9 +43,15 @@ static bool patch_stereo(std::string& src) {
                "_out.outPosition.y = dot(outPos, k7_py); }  // k7vr stereo");
     size_t consts = src.find(kConsts);
     size_t project = src.find(kProject);
-    if (consts == std::string::npos || project == std::string::npos) return false;
+    const size_t out_struct = src.find("struct VS_OUTPUT");
+    const size_t out_end = out_struct == std::string::npos ? out_struct : src.find("};", out_struct);
+    if (consts == std::string::npos || project == std::string::npos || out_end == std::string::npos || out_end > consts)
+        return false;
     // Per-draw transform first (slot b13: the first-person arm and gun), then the eye's head transform.
+    // The arm/gun draw is also clipped at a plane behind the grip (k7_draw.y: eye-space z in the
+    // game's aim view), so the forearm doesn't swing into view when the hand turns.
     src.insert(project,
+               "_out.k7clip = (projMatrix[3].w == 0 && k7_draw.x != 0) ? k7_draw.y - outPos.z : 1;  // k7vr per-draw\n\t"
                "if (projMatrix[3].w == 0 && k7_draw.x != 0) outPos.xyz = float3(dot(k7_obj[0], outPos), "
                "dot(k7_obj[1], outPos), dot(k7_obj[2], outPos));  // k7vr per-draw\n\t"
                "if (projMatrix[3].w == 0) outPos.xyz = float3(dot(k7_head[0], outPos), dot(k7_head[1], outPos), "
@@ -54,6 +60,7 @@ static bool patch_stereo(std::string& src) {
                "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; float4 k7_px; float4 k7_py; float4 k7_flags; };"
                "  // k7vr stereo\n"
                "cbuffer K7Draw : register(b13) { float4 k7_obj[3]; float4 k7_draw; };  // k7vr per-draw\n\n");
+    src.insert(out_end, "\tfloat k7clip : SV_ClipDistance0;  // k7vr per-draw\n");
     return true;
 }
 
@@ -119,6 +126,28 @@ static HRESULT WINAPI hk_D3DCompile(LPCVOID src, SIZE_T len, LPCSTR name, const 
         if (new_errors) new_errors->Release();
     }
     return hr;
+}
+
+ID3DBlob* compile_hlsl(const char* src, const char* target, const char* name) {
+    D3DCompile_t compile = o_D3DCompile;
+    if (!compile) {  // the hook isn't installed (or not yet): the compiler directly
+        HMODULE dll = LoadLibraryW(L"d3dcompiler_47.dll");
+        compile = dll ? reinterpret_cast<D3DCompile_t>(GetProcAddress(dll, "D3DCompile")) : nullptr;
+    }
+    if (!compile) {
+        logf("%s: no D3DCompile", name);
+        return nullptr;
+    }
+    ID3DBlob* code = nullptr;
+    ID3DBlob* errors = nullptr;
+    const HRESULT hr = compile(src, strlen(src), name, nullptr, nullptr, "main", target, 0, 0, &code, &errors);
+    if (FAILED(hr) || !code) {
+        logf("%s: compile failed: %s", name, errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?");
+        if (code) code->Release();
+        code = nullptr;
+    }
+    if (errors) errors->Release();
+    return code;
 }
 
 void install_compile_hook() {

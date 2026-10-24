@@ -24,6 +24,7 @@ add_library(k7vr SHARED
     src/proxy/audio_mute.cpp
     src/proxy/memscan.cpp
     src/proxy/fov_inflate.cpp
+    src/proxy/aim.cpp
     src/vr/headmath.cpp
     src/vr/vr.cpp
     src/vr/input.cpp

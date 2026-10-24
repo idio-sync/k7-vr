@@ -117,7 +117,46 @@ static void test_frustum_scissor() {
     }
 }
 
+static void test_aim_angles_match_probe() {
+    // Aim controller readings from the game (yaw -2.59336, pitch 0.0058; target 100 units out).
+    const float eye[3] = {-11, 18, 289.5f}, tgt[3] = {-63.1333f, 18.5739f, 204.167f};
+    const float d[3] = {tgt[0] - eye[0], tgt[1] - eye[1], tgt[2] - eye[2]};
+    float yaw, pitch;
+    aim_angles(d, &yaw, &pitch);
+    CHECK_NEAR(yaw, -2.59336, 1e-3);
+    CHECK_NEAR(pitch, 0.00581, 1e-3);
+    // look_at's -z axis is the view direction, x is level.
+    const Pose cam = look_at(eye, tgt);
+    CHECK_NEAR(-cam.m[0][2], d[0] / 100, 1e-3);
+    CHECK_NEAR(-cam.m[2][2], d[2] / 100, 1e-3);
+    CHECK_NEAR(cam.m[1][0], 0, 1e-6);
+}
+
+static void test_world_lock_keeps_world_still() {
+    // Anchor: the level frame of the camera when aiming started. Later the game camera turns
+    // (yaw and pitch); with the lock, a world point lands in the same place in the eye.
+    const float eye[3] = {-11, 18, 289.5f};
+    const float t0[3] = {-11, 18, 189.5f};
+    const Pose anchor = yaw_only(look_at(eye, t0));
+    const float world[3] = {5, 30, 250};
+    float expected[3], got[3];
+    apply_pose(inverse(anchor), world, expected);
+    const float targets[2][3] = {{-63, 40, 204}, {20, -10, 380}};
+    for (const auto& t1 : targets) {
+        const Pose cam = look_at(eye, t1);
+        float in_cam[3];
+        apply_pose(inverse(cam), world, in_cam);  // what the game's vertex shader has
+        const Pose cam_in_anchor = compose(inverse(anchor), cam);
+        float head[12];
+        eye_space_transform(compose(inverse(cam_in_anchor), identity()), 1.0f, head);
+        apply(head, in_cam, got);
+        for (int i = 0; i < 3; ++i) CHECK_NEAR(got[i], expected[i], 1e-3);
+    }
+}
+
 int main() {
+    test_aim_angles_match_probe();
+    test_world_lock_keeps_world_still();
     test_frustum_scissor();
     test_inverse_compose();
     test_yaw_turns_right();

@@ -1,10 +1,12 @@
 // Command file: tools write k7vr\cmd.txt (atomically, via rename) and the probe reads it at
 // the next frame boundary. One command per line:
-//   capture                 next frame's draw list + PNG (also F10)
+//   capture [N...]          next frame's draw list + PNG (also F10); also the render target after each draw N
 //   shot                    PNG of the next frame
 //   stereo IPD_M            simulated headset (vr sim mode) with that eye separation in metres; 0 = off
 //   recenter / unit M       recentre the VR view / set metres per game unit
 //   view YAW PITCH          simulated head direction from the game camera, degrees (+yaw right, +pitch up)
+//   hand YAW PITCH          simulated right controller direction, degrees (sim mode; aims in aim mode)
+//   gun NAME A [B C]        live aim-mode tuning: scale S / pivot X Y Z / clip Z / converge M / hudmask F
 //   pair                    PNGs of both eyes of the next frame (pair_NNN_L/R.png)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
@@ -142,7 +144,9 @@ static void run_line(const std::string& line) {
         return;
     }
     if (cmd == "capture") {
-        g_steps.push_back(Step{.capture = true});
+        std::vector<unsigned> snaps;
+        for (unsigned n; ss >> n;) snaps.push_back(n);
+        g_steps.push_back(Step{.capture = true, .action = [=] { set_capture_snaps(snaps); }});
     } else if (cmd == "shot") {
         g_steps.push_back(Step{.shot = true});
     } else if (cmd == "pair") {
@@ -151,6 +155,15 @@ static void run_line(const std::string& line) {
         float yaw = 0, pitch = 0;
         ss >> yaw >> pitch;
         g_steps.push_back(Step{.view = true, .yaw = yaw, .pitch = pitch});
+    } else if (cmd == "gun") {
+        std::string name;
+        float v[3] = {};
+        ss >> name >> v[0] >> v[1] >> v[2];
+        g_steps.push_back(Step{.action = [=] { set_gun_param(name, v); }});
+    } else if (cmd == "hand") {
+        float yaw = 0, pitch = 0;
+        ss >> yaw >> pitch;
+        g_steps.push_back(Step{.action = [=] { vr::set_sim_hand(yaw, pitch); }});
     } else if (cmd == "stereo") {
         float sep = 0;
         ss >> sep;

@@ -65,6 +65,39 @@ void eye_space_transform(const Pose& eye_in_anchor, float unit_m, float out[12])
     }
 }
 
+Pose look_at(const float eye[3], const float target[3]) {
+    float f[3] = {target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]};
+    float len = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (len < 1e-6f) return translation(eye[0], eye[1], eye[2]);
+    for (float& v : f) v /= len;
+    // right = f x up(0,1,0), up = right x f; columns of R are right, up, back (-f).
+    float r[3] = {-f[2], 0, f[0]};
+    len = sqrtf(r[0] * r[0] + r[2] * r[2]);
+    if (len < 1e-6f) r[0] = 1, r[2] = 0, len = 1;  // straight up/down: any heading
+    r[0] /= len, r[2] /= len;
+    const float u[3] = {r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]};
+    Pose p = translation(eye[0], eye[1], eye[2]);
+    for (int i = 0; i < 3; ++i) p.m[i][0] = r[i], p.m[i][1] = u[i], p.m[i][2] = -f[i];
+    return p;
+}
+
+void aim_angles(const float d[3], float* yaw, float* pitch) {
+    const float h = sqrtf(d[0] * d[0] + d[2] * d[2]);
+    *yaw = atan2f(d[0], d[2]);
+    *pitch = atan2f(d[1], h);
+}
+
+Pose scaled(const Pose& p, float s) {
+    Pose r = p;
+    for (int i = 0; i < 3; ++i) r.m[i][3] *= s;
+    return r;
+}
+
+void pose_rows(const Pose& p, float out[12]) {
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 4; ++j) out[i * 4 + j] = p.m[i][j];
+}
+
 void projection_rows(float l, float r, float b, float t, float out_x[4], float out_y[4]) {
     // x_ndc = (x/(-z) - (l+r)/2) / ((r-l)/2)  with w = -z  =>  x_clip = 2/(r-l) x + (r+l)/(r-l) z
     out_x[0] = 2 / (r - l);
