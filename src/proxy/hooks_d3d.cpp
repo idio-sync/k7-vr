@@ -199,6 +199,11 @@ constexpr UINT kMaxTargets = 4;
 constexpr UINT kMaxTextures = 8;
 static ID3D11Buffer* g_eye_cb[2];  // left, right
 static ID3D11Buffer* g_gv_cb;      // game-view pass (vr::game_view)
+static ID3D11Buffer* g_draw_cb[2];  // slot b13 per-draw transform: [0] none, [1] first-person arm and gun
+constexpr UINT kDrawSlot = 13;
+static bool g_aim_mode;             // the game's first-person aim camera is active this frame
+static int g_gun_run;               // 0 before the frame's first 3D draw, 1 inside the arm/gun run, 2 after
+static uint64_t g_gun_ps;
 static vr::EyeConsts g_eyes[2];    // this frame's eyes
 static bool g_pair;                // save both eyes at the end of this frame
 static unsigned g_pair_index;
@@ -215,10 +220,64 @@ static std::vector<uint64_t> g_card_ps;  // pixel shaders of view-dependent effe
 static bool g_card_skip;                 // [vr] card_mode=skip
 static std::unordered_map<ID3D11RasterizerState*, ID3D11RasterizerState*> g_scissor_states;
 
+// Aim mode: the camera manager's eye and look-at target are the aim controller's (RVA 0x46bde8;
+// manager pointer at RVA 0x46fa54). Reads are guarded in case either object isn't there.
+static bool guarded_read(const void* p, void* out, size_t n) {
+    __try {
+        memcpy(out, p, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool aim_mode_now() {
+    const uintptr_t exe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uintptr_t mgr = 0;
+    float m_eye[3], m_tgt[3], a_eye[3], a_tgt[3];
+    if (!guarded_read(reinterpret_cast<void*>(exe + 0x46fa54), &mgr, 4) || !mgr) return false;
+    const uintptr_t aim = exe + 0x46bde8;
+    if (!guarded_read(reinterpret_cast<void*>(mgr + 0x0c), m_eye, 12) ||
+        !guarded_read(reinterpret_cast<void*>(mgr + 0x24), m_tgt, 12) ||
+        !guarded_read(reinterpret_cast<void*>(aim + 0xdc), a_eye, 12) ||
+        !guarded_read(reinterpret_cast<void*>(aim + 0xf4), a_tgt, 12))
+        return false;
+    for (int i = 0; i < 3; ++i)
+        if (fabsf(m_eye[i] - a_eye[i]) > 1e-3f || fabsf(m_tgt[i] - a_tgt[i]) > 1e-3f) return false;
+    return true;
+}
+
+static void init_draw_buffers() {
+    float gun_scale = 0.6f;
+    wchar_t buf[32];
+    GetPrivateProfileStringW(L"vr", L"gun_scale", L"", buf, 32, path_in(L"k7vr.ini").c_str());
+    if (buf[0]) gun_scale = float(_wtof(buf));
+    float pivot[3] = {0.45f, -0.9f, -2.5f};  // near the gun's origin in the game's aim view (game units)
+    GetPrivateProfileStringW(L"vr", L"gun_pivot", L"", buf, 32, path_in(L"k7vr.ini").c_str());
+    if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &pivot[0], &pivot[1], &pivot[2]);
+    // [0]: no transform. [1]: the arm and gun shrunk in place around the pivot.
+    // M4 replaces this with the controller pose.
+    const float none[16] = {};
+    const float k = 1 - gun_scale;
+    const float gun[16] = {gun_scale, 0, 0, k * pivot[0], 0, gun_scale, 0, k * pivot[1],
+                           0,         0, gun_scale, k * pivot[2], 1, 0, 0, 0};
+    D3D11_BUFFER_DESC d{sizeof(gun), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+    D3D11_SUBRESOURCE_DATA i0{none, 0, 0}, i1{gun, 0, 0};
+    g_dev->CreateBuffer(&d, &i0, &g_draw_cb[0]);
+    g_dev->CreateBuffer(&d, &i1, &g_draw_cb[1]);
+    g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
+    logf("stereo: gun scale %g", gun_scale);
+}
+
 // Before the game draws a frame: both eyes' transforms and projections (waits for headset
 // poses in OpenVR mode).
 static void set_eye_offsets() {
     if (!g_eye_cb[0] || !g_eye_cb[1]) return;
+    const bool aim = vr::stereo() && aim_mode_now();
+    if (aim != g_aim_mode) logf("stereo: aim mode %s", aim ? "on" : "off");
+    g_aim_mode = aim;
+    g_gun_run = 0;
+    if (g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
     vr::begin_frame(ratio, g_eyes);
     for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &g_eyes[eye], 0, 0);
@@ -715,8 +774,24 @@ static void draw_stereo(DrawFn draw) {
         release_targets();
         return;
     }
+    // In aim mode the first run of 3D draws (same pixel shader) after the clear is the
+    // first-person arm and gun.
+    bool gun = false;
+    if (g_aim_mode && scene && kind == 1 && g_gun_run < 2) {
+        ID3D11PixelShader* ps = nullptr;
+        g_ctx->PSGetShader(&ps, nullptr, nullptr);
+        const uint64_t h = shader_hash(ps);
+        if (ps) ps->Release();
+        if (g_gun_run == 0) g_gun_run = 1, g_gun_ps = h;
+        if (h == g_gun_ps)
+            gun = true;
+        else
+            g_gun_run = 2;
+    }
+    if (gun && g_draw_cb[1]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[1]);
     const bool card = kind == 1 && is_card_shader();
     if (card && g_card_skip) {  // card_mode=skip: view-dependent cards are left out of the eyes
+        if (gun && g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
         draw_game_view(draw, rtv, dsv, scale);
         release_targets();
         return;
@@ -758,6 +833,7 @@ static void draw_stereo(DrawFn draw) {
         for (auto s : srv)
             if (s) s->Release();
     }
+    if (gun && g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
     if (scene) draw_game_view(draw, rtv, dsv, scale);
     release_targets();
 }
@@ -1451,6 +1527,7 @@ static void hook_device(ID3D11Device* dev) {
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
     vr::init(dev, g_ctx);
     load_card_list();
+    init_draw_buffers();
 
     g_wrapped = wrap_context(g_ctx);
     wrap(vt::ctx_DrawIndexed, &w_DrawIndexed);

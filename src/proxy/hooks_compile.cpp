@@ -44,12 +44,16 @@ static bool patch_stereo(std::string& src) {
     size_t consts = src.find(kConsts);
     size_t project = src.find(kProject);
     if (consts == std::string::npos || project == std::string::npos) return false;
+    // Per-draw transform first (slot b13: the first-person arm and gun), then the eye's head transform.
     src.insert(project,
+               "if (projMatrix[3].w == 0 && k7_draw.x != 0) outPos.xyz = float3(dot(k7_obj[0], outPos), "
+               "dot(k7_obj[1], outPos), dot(k7_obj[2], outPos));  // k7vr per-draw\n\t"
                "if (projMatrix[3].w == 0) outPos.xyz = float3(dot(k7_head[0], outPos), dot(k7_head[1], outPos), "
                "dot(k7_head[2], outPos));  // k7vr stereo\n\t");
     src.insert(consts,
                "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; float4 k7_px; float4 k7_py; float4 k7_flags; };"
-               "  // k7vr stereo\n\n");
+               "  // k7vr stereo\n"
+               "cbuffer K7Draw : register(b13) { float4 k7_obj[3]; float4 k7_draw; };  // k7vr per-draw\n\n");
     return true;
 }
 
