@@ -15,7 +15,7 @@ $lines = @(
     "fake_pad=$(& $b $test)",
     "minimized=$(& $b $test)",
     "leave_desktop_alone=$(& $b $test)",
-    "auto_activate=$(& $b $test)",
+    'auto_activate=1',  # the game ignores input unless it thinks it is active (scripted or controller keys)
     "mute=$(& $b $test)",
     'log_files=0',
     '',

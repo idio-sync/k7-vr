@@ -10,6 +10,8 @@
 
 namespace k7::vr {
 
+void poll_controllers(::vr::IVRSystem* sys);  // input.cpp
+
 static Mode g_mode = Mode::Off;
 static float g_unit = 0.25f;
 static float g_ipd = 0.064f;
@@ -155,6 +157,7 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
     if (g_mode == Mode::OpenVR) {
         ::vr::TrackedDevicePose_t poses[::vr::k_unMaxTrackedDeviceCount];
         ::vr::VRCompositor()->WaitGetPoses(poses, ::vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+        poll_controllers(g_system);
         const auto& hmd = poses[::vr::k_unTrackedDeviceIndex_Hmd];
         head = hmd.bPoseIsValid ? from_openvr(hmd.mDeviceToAbsoluteTracking) : identity();
         for (int eye = 0; eye < 2; ++eye) {

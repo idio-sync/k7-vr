@@ -26,6 +26,7 @@ add_library(k7vr SHARED
     src/proxy/fov_inflate.cpp
     src/vr/headmath.cpp
     src/vr/vr.cpp
+    src/vr/input.cpp
     src/proxy/png.cpp
     src/proxy/control.cpp
     src/proxy/xinput.cpp)
