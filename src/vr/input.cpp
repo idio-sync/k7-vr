@@ -3,7 +3,7 @@
 // SteamVR's legacy controller state is used so no action manifest is needed (setting one turns
 // legacy input off for the app); stick and trigger axes are found from each controller's axis types.
 //
-// Default layout (test profile key bindings; see docs/playtests):
+// Default layout (the keys the VR profile binds, ini_bindings.cpp; also in the README):
 //   right trigger = fire (J)            right grip (hold) = aim (Space)
 //   right A = accept (Space)            right B = skip / decline (Esc)
 //   right stick = aim/menu arrows       right stick click = reload (R)

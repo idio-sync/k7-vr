@@ -272,7 +272,6 @@ static ID3D11Buffer* g_draw_cb[2];  // slot b13 per-draw transform: [0] none, [1
 constexpr UINT kDrawSlot = 13;
 static bool g_aim_mode;             // the game's first-person aim camera is active this frame
 static int g_gun_run;               // 0 before the frame's first 3D draw, 1 inside the arm/gun run, 2 after
-static uint64_t g_gun_ps;
 static vr::EyeConsts g_eyes[2];    // this frame's eyes
 static bool g_pair;                // save both eyes at the end of this frame
 static unsigned g_pair_index;
@@ -298,8 +297,18 @@ static std::unordered_map<ID3D11RasterizerState*, ID3D11RasterizerState*> g_scis
 //    aim_converge_m along the controller's ray, so shots land where the hand points at that range;
 //  - the first-person arm and gun are moved from the game's aim view into the hand.
 static float g_gun_scale = 0.6f;
-static float g_gun_pivot[3] = {0.45f, -0.9f, -2.5f};  // the gun's grip in the game's aim view (game units)
-static float g_gun_clip_z = -1.5f;                    // the arm is cut off nearer the camera than this
+// The gun's grip in the game's aim view (game units). Each character holds the gun elsewhere
+// (Garcian ~2.5 units ahead, Dan ~4.3), so it is found at the start of each aim session: the
+// first arm/gun draw whose model sits 1-8 units ahead (skinned arm pieces report other matrices),
+// followed while the arm is raised and fixed once it holds still, so the game's recoil still
+// moves the gun. [vr] gun_pivot (or `gun pivot`) sets it by hand instead.
+static float g_gun_pivot[3] = {0.45f, -0.9f, -2.5f};
+static bool g_gun_pivot_manual;
+static int g_pivot_frames;                            // aim-mode frames so far this session
+static bool g_pivot_seen;                             // found in this frame's arm/gun draws
+static int g_pivot_still;                             // frames the grip has held still
+static bool g_pivot_locked;                           // the grip is fixed for this aim session
+static float g_gun_clip = 2.0f;                       // the arm (sleeve) is cut off this far behind the grip (units)
 static float g_aim_converge = 10;                     // metres
 static bool g_anchor_set;
 static vr::Pose g_anchor;                             // world pose (game units) of the player's frame
@@ -312,6 +321,16 @@ static bool g_laser_ready;                            // g_laser_pose is this fr
 static vr::Pose g_laser_pose;                         // the hand in the game camera's eye space (game units)
 static float g_laser_from, g_laser_to;                // this frame's beam, metres along the hand's ray
 static bool g_pointer_mode;                           // a laser-pointer screen follows the hand this frame
+// Guns without a laser in aim mode, by the vertex count of the gun mesh the grip is found on
+// (the game has no persona flag we know of; the meshes differ). [vr] no_laser_guns, default Dan's
+// revolver (1269; Garcian's pistol is 690).
+static std::vector<UINT> g_no_laser_guns = {1269};
+static UINT g_grip_mesh;                              // vertex count of this aim session's grip draw
+static UINT g_draw_count;                             // the current draw's vertex count
+
+static bool gun_has_laser() {
+    return std::find(g_no_laser_guns.begin(), g_no_laser_guns.end(), g_grip_mesh) == g_no_laser_guns.end();
+}
 
 static void init_draw_buffers() {
     wchar_t buf[64];
@@ -319,15 +338,19 @@ static void init_draw_buffers() {
     GetPrivateProfileStringW(L"vr", L"gun_scale", L"", buf, 64, ini.c_str());
     if (buf[0]) g_gun_scale = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"gun_pivot", L"", buf, 64, ini.c_str());
-    if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &g_gun_pivot[0], &g_gun_pivot[1], &g_gun_pivot[2]);
-    GetPrivateProfileStringW(L"vr", L"gun_clip_z", L"", buf, 64, ini.c_str());
-    if (buf[0]) g_gun_clip_z = float(_wtof(buf));
+    if (buf[0]) g_gun_pivot_manual = swscanf_s(buf, L"%f,%f,%f", &g_gun_pivot[0], &g_gun_pivot[1], &g_gun_pivot[2]) == 3;
+    GetPrivateProfileStringW(L"vr", L"gun_clip", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_gun_clip = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_converge = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"laser_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_laser_length = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"aim_hud_mask", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_hud_mask = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"no_laser_guns", L"1269", buf, 64, ini.c_str());
+    g_no_laser_guns.clear();
+    for (wchar_t *ctx = nullptr, *tok = wcstok_s(buf, L", ", &ctx); tok; tok = wcstok_s(nullptr, L", ", &ctx))
+        g_no_laser_guns.push_back(UINT(_wtoi(tok)));
     GetPrivateProfileStringW(L"vr", L"aim_pitch_limit", L"80", buf, 64, ini.c_str());
     const float limit = float(_wtof(buf));
     if (limit > 36 && limit < 90) aim_widen_clamp(limit * 3.14159265f / 180);
@@ -348,15 +371,56 @@ static void init_draw_buffers() {
 
 void set_gun_param(const std::string& name, const float v[3]) {
     if (name == "scale") g_gun_scale = v[0];
-    else if (name == "pivot") memcpy(g_gun_pivot, v, sizeof(g_gun_pivot));
-    else if (name == "clip") g_gun_clip_z = v[0];
+    else if (name == "pivot") memcpy(g_gun_pivot, v, sizeof(g_gun_pivot)), g_gun_pivot_manual = true;
+    else if (name == "autopivot") g_gun_pivot_manual = false, g_pivot_frames = g_pivot_still = 0, g_pivot_locked = false;
+    else if (name == "clip") g_gun_clip = v[0];
     else if (name == "converge") g_aim_converge = v[0];
     else if (name == "hudmask") g_aim_hud_mask = v[0];
     else if (name == "laser") g_laser_length = v[0];
     else if (name == "laserdepth") g_laser_depth = v[0] != 0;
     else logf("gun: unknown setting '%s'", name.c_str());
     logf("gun: scale %g pivot %g,%g,%g clip %g converge %g hud mask %g", g_gun_scale, g_gun_pivot[0], g_gun_pivot[1],
-         g_gun_pivot[2], g_gun_clip_z, g_aim_converge, g_aim_hud_mask);
+         g_gun_pivot[2], g_gun_clip, g_aim_converge, g_aim_hud_mask);
+}
+
+// An arm/gun draw in the first frames of an aim session: its model position (model-view
+// translation) is the grip if it sits 1-8 units in front of the camera. The transform for the
+// rest of this frame's run is rewritten right away.
+static void relock_aim();
+
+constexpr float kGunRunRadius = 25;  // game units
+
+// The bound draw's model position in eye space (the translation of its position matrix 0).
+static bool model_translation(float t[3]) {
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return false;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (it == g_cb.end() || it->second.size() < kTemplateCbMin) return false;
+    const float* f = reinterpret_cast<const float*>(it->second.data());
+    t[0] = f[3], t[1] = f[7], t[2] = f[11];
+    return true;
+}
+
+static void find_gun_pivot() {
+    if (g_pivot_seen || g_pivot_locked) return;
+    float t[3];
+    if (!model_translation(t) || !(t[2] < -1 && t[2] > -8)) return;
+    g_pivot_seen = true;
+    g_grip_mesh = g_draw_count;
+    if (g_gun_pivot_manual) return;
+    // The arm is still being raised in the first frames: follow it until it holds still.
+    const float moved = fabsf(t[0] - g_gun_pivot[0]) + fabsf(t[1] - g_gun_pivot[1]) + fabsf(t[2] - g_gun_pivot[2]);
+    g_pivot_still = moved < 0.01f ? g_pivot_still + 1 : 0;
+    if (g_pivot_still >= 10 || g_pivot_frames > 120) {
+        g_pivot_locked = true;
+        logf("aim: gun grip at %.2f,%.2f,%.2f (gun mesh %u vertices%s)", t[0], t[1], t[2], g_grip_mesh,
+             gun_has_laser() ? "" : ", no laser");
+    }
+    if (moved < 1e-4f) return;
+    memcpy(g_gun_pivot, t, sizeof(t));
+    relock_aim();  // same camera and hand, new grip
 }
 
 // Frame start, aim mode: point the game's aim where the hand points.
@@ -389,7 +453,7 @@ static void relock_aim() {
     // Game aim view -> anchor: the grip goes to the hand, scaled by gun_scale around the grip.
     const vr::Pose q = vr::compose(vr::inverse(cam), vr::scaled(hand, 1 / u));
     g_laser_pose = q;
-    g_laser_ready = g_laser_length > 0;
+    g_laser_ready = g_laser_length > 0 && gun_has_laser();
     g_laser_from = g_laser_muzzle, g_laser_to = g_laser_length;
     const float s = g_gun_scale;
     float m[16] = {};
@@ -398,7 +462,7 @@ static void relock_aim() {
         m[i * 4 + 3] = q.m[i][3] - s * (q.m[i][0] * g_gun_pivot[0] + q.m[i][1] * g_gun_pivot[1] + q.m[i][2] * g_gun_pivot[2]);
     }
     m[12] = 1;
-    m[13] = g_gun_clip_z;
+    m[13] = g_gun_pivot[2] + g_gun_clip;
     g_ctx->UpdateSubresource(g_draw_cb[1], 0, nullptr, m, 0, 0);
 }
 
@@ -630,7 +694,12 @@ static void set_eye_offsets() {
         float eye[3], tgt[3];
         g_anchor_set = aim_camera(eye, tgt);
         if (g_anchor_set) g_anchor = vr::yaw_only(vr::look_at(eye, tgt));
+        g_pivot_frames = g_pivot_still = 0;
+        g_pivot_locked = false;
+    } else if (aim) {
+        ++g_pivot_frames;
     }
+    g_pivot_seen = false;
     if (!aim) g_anchor_set = false;
     g_aim_mode = aim;
     g_gun_run = 0;
@@ -1177,19 +1246,19 @@ static void draw_stereo(DrawFn draw) {
         release_targets();
         return;
     }
-    // In aim mode the first run of 3D draws (same pixel shader) after the clear is the
-    // first-person arm and gun.
+    // In aim mode the first run of 3D draws after the clear whose models sit near the camera is
+    // the first-person arm and gun (and the character's body behind the camera, which the grip
+    // clip removes). Shaders differ: Dan's arm and revolver use two. The world starts far out.
     bool gun = false;
     if (g_aim_mode && scene && kind == 1 && g_gun_run < 2) {
-        ID3D11PixelShader* ps = nullptr;
-        g_ctx->PSGetShader(&ps, nullptr, nullptr);
-        const uint64_t h = shader_hash(ps);
-        if (ps) ps->Release();
-        if (g_gun_run == 0) g_gun_run = 1, g_gun_ps = h;
-        if (h == g_gun_ps)
+        float t[3];
+        if (model_translation(t) && t[0] * t[0] + t[1] * t[1] + t[2] * t[2] < kGunRunRadius * kGunRunRadius) {
+            g_gun_run = 1;
             gun = true;
-        else
+            find_gun_pivot();
+        } else {
             g_gun_run = 2;
+        }
     }
     if (gun && g_draw_cb[1]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[1]);
     const bool card = kind == 1 && is_card_shader();
@@ -1332,6 +1401,7 @@ static void grab_final_source() {
 }
 
 static void before_draw(const char* kind, UINT count, UINT instances, INT first_vertex = -1) {
+    g_draw_count = count;
     if (g_cap.active) capture_draw(g_ctx, kind, count, instances, first_vertex);
     if (g_want_image) grab_final_source();
     ++g_draws;
