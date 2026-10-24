@@ -155,14 +155,16 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
     }
 }
 
-static bool ensure_eye_textures(ID3D11Texture2D* like) {
+// Our own texture shaped like `like` (shader-resource only), recreated when the shape changes.
+static bool ensure_like(ID3D11Texture2D*& t, ID3D11Texture2D* like) {
     D3D11_TEXTURE2D_DESC d;
     like->GetDesc(&d);
-    if (g_eye_tex[0]) {
+    if (t) {
         D3D11_TEXTURE2D_DESC have;
-        g_eye_tex[0]->GetDesc(&have);
+        t->GetDesc(&have);
         if (have.Width == d.Width && have.Height == d.Height && have.Format == d.Format) return true;
-        for (auto& t : g_eye_tex) t->Release(), t = nullptr;
+        t->Release();
+        t = nullptr;
     }
     d.MipLevels = 1;
     d.ArraySize = 1;
@@ -171,22 +173,87 @@ static bool ensure_eye_textures(ID3D11Texture2D* like) {
     d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     d.CPUAccessFlags = 0;
     d.MiscFlags = 0;
-    for (auto& t : g_eye_tex)
-        if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &t))) return false;
-    logf("vr: eye textures %ux%u f%d", d.Width, d.Height, d.Format);
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &t))) return false;
+    logf("vr: texture %ux%u f%d", d.Width, d.Height, d.Format);
     return true;
 }
 
-void submit(ID3D11Texture2D* left, ID3D11Texture2D* right) {
-    if (g_mode != Mode::OpenVR || !left || !right || !ensure_eye_textures(left)) return;
-    g_ctx->CopySubresourceRegion(g_eye_tex[0], 0, 0, 0, 0, left, 0, nullptr);
-    g_ctx->CopySubresourceRegion(g_eye_tex[1], 0, 0, 0, 0, right, 0, nullptr);
+static ID3D11Texture2D* black_texture() {
+    static ID3D11Texture2D* black;
+    if (!black) {
+        static const uint32_t pixels[16 * 16] = {};
+        D3D11_TEXTURE2D_DESC d{16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+                               D3D11_BIND_SHADER_RESOURCE, 0, 0};
+        D3D11_SUBRESOURCE_DATA init{pixels, 16 * 4, 0};
+        g_dev->CreateTexture2D(&d, &init, &black);
+    }
+    return black;
+}
+
+static ::vr::HmdMatrix34_t to_openvr(const Pose& p) {
+    ::vr::HmdMatrix34_t m;
+    memcpy(m.m, p.m, sizeof(m.m));
+    return m;
+}
+
+// A world-locked SteamVR overlay panel in front of the seated reference.
+struct Panel {
+    const char* key;
+    const char* name;
+    float width_m, distance_m, drop_m;
+    bool opaque;
+    ::vr::VROverlayHandle_t handle = ::vr::k_ulOverlayHandleInvalid;
+    ID3D11Texture2D* copy = nullptr;
+    bool shown = false;
+};
+static Panel g_hud_panel{"k7vr.hud", "Killer7 VR HUD", 1.4f, 2.0f, 0.1f, false};
+static Panel g_screen_panel{"k7vr.screen", "Killer7 VR screen", 3.2f, 3.0f, 0.0f, true};
+
+static void update_panel(Panel& p, ID3D11Texture2D* src) {
+    auto overlay = ::vr::VROverlay();
+    if (!overlay) return;
+    if (!src) {
+        if (p.shown) overlay->HideOverlay(p.handle), p.shown = false;
+        return;
+    }
+    if (p.handle == ::vr::k_ulOverlayHandleInvalid) {
+        const ::vr::EVROverlayError e = overlay->CreateOverlay(p.key, p.name, &p.handle);
+        if (e != ::vr::VROverlayError_None) {
+            logf("vr: CreateOverlay %s -> %d", p.key, int(e));
+            return;
+        }
+        if (p.opaque)
+            overlay->SetOverlayFlag(p.handle, ::vr::VROverlayFlags_IgnoreTextureAlpha, true);
+        else  // the HUD's colour is already multiplied by its alpha (see draw_hud)
+            overlay->SetOverlayFlag(p.handle, ::vr::VROverlayFlags_IsPremultiplied, true);
+        overlay->SetOverlayWidthInMeters(p.handle, p.width_m);
+    }
+    if (!ensure_like(p.copy, src)) return;
+    g_ctx->CopySubresourceRegion(p.copy, 0, 0, 0, 0, src, 0, nullptr);
+    ::vr::Texture_t tex{p.copy, ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
+    overlay->SetOverlayTexture(p.handle, &tex);
+    const ::vr::HmdMatrix34_t m = to_openvr(compose(g_reference, translation(0, -p.drop_m, -p.distance_m)));
+    overlay->SetOverlayTransformAbsolute(p.handle, ::vr::VRCompositor()->GetTrackingSpace(), &m);
+    if (!p.shown) overlay->ShowOverlay(p.handle), p.shown = true;
+}
+
+void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud, ID3D11Texture2D* screen) {
+    if (g_mode != Mode::OpenVR) return;
+    ID3D11Texture2D* eyes[2] = {black_texture(), black_texture()};
+    if (left && right && ensure_like(g_eye_tex[0], left) && ensure_like(g_eye_tex[1], right)) {
+        g_ctx->CopySubresourceRegion(g_eye_tex[0], 0, 0, 0, 0, left, 0, nullptr);
+        g_ctx->CopySubresourceRegion(g_eye_tex[1], 0, 0, 0, 0, right, 0, nullptr);
+        eyes[0] = g_eye_tex[0];
+        eyes[1] = g_eye_tex[1];
+    }
     for (int eye = 0; eye < 2; ++eye) {
-        ::vr::Texture_t tex{g_eye_tex[eye], ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
+        ::vr::Texture_t tex{eyes[eye], ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
         const ::vr::EVRCompositorError e = ::vr::VRCompositor()->Submit(::vr::EVREye(eye), &tex);
         static int errors;
         if (e != ::vr::VRCompositorError_None && errors++ < 10) logf("vr: Submit eye %d -> %d", eye, int(e));
     }
+    update_panel(g_hud_panel, hud);
+    update_panel(g_screen_panel, screen);
 }
 
 }  // namespace k7::vr

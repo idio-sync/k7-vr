@@ -29,8 +29,10 @@ bool stereo();  // drawing two eyes (Sim or OpenVR)
 // game_xy_ratio = the game projection's y scale / x scale (its aspect), for sim and flat modes.
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]);
 
-// Called once per frame after the game drew it: hands both eye images to the compositor.
-void submit(ID3D11Texture2D* left, ID3D11Texture2D* right);
+// Called once per frame after the game drew it. 3D frames: both eye images plus the HUD
+// (transparent, on a world-locked panel). 2D frames (menus, FMVs, loading): eyes null (black)
+// and `screen` is the game's mono image, shown on a larger opaque virtual screen.
+void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud, ID3D11Texture2D* screen);
 
 void recenter();
 void set_mode(Mode m);  // Off <-> Sim from the command file; OpenVR only from the ini

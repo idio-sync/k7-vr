@@ -77,4 +77,35 @@ void projection_rows(float l, float r, float b, float t, float out_x[4], float o
     out_y[3] = 0;
 }
 
+void frustum_scissor(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y, int width,
+                     int height, int out[4]) {
+    float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f;
+    bool unbounded = false;
+    for (int c = 0; c < 4; ++c) {
+        const float g[3] = {(c & 1 ? 1 : -1) * tan_x, (c & 2 ? 1 : -1) * tan_y, -1};
+        float e[3];
+        for (int i = 0; i < 3; ++i) e[i] = head[i * 4] * g[0] + head[i * 4 + 1] * g[1] + head[i * 4 + 2] * g[2];
+        if (e[2] > -1e-4f) {  // corner at or behind the eye plane: the region reaches the image edge
+            unbounded = true;
+            continue;
+        }
+        const float w = -e[2];
+        const float nx = (px[0] * e[0] + px[1] * e[1] + px[2] * e[2]) / w;
+        const float ny = (py[0] * e[0] + py[1] * e[1] + py[2] * e[2]) / w;
+        min_x = fminf(min_x, nx), max_x = fmaxf(max_x, nx);
+        min_y = fminf(min_y, ny), max_y = fmaxf(max_y, ny);
+    }
+    if (unbounded) {
+        min_x = min_y = -1;
+        max_x = max_y = 1;
+    }
+    auto clampi = [](float v, int hi) { return v < 0 ? 0 : (v > float(hi) ? hi : int(v + 0.5f)); };
+    out[0] = clampi((min_x * 0.5f + 0.5f) * width, width);
+    out[2] = clampi((max_x * 0.5f + 0.5f) * width, width);
+    out[1] = clampi((0.5f - max_y * 0.5f) * height, height);
+    out[3] = clampi((0.5f - min_y * 0.5f) * height, height);
+    if (out[2] < out[0]) out[2] = out[0];
+    if (out[3] < out[1]) out[3] = out[1];
+}
+
 }  // namespace k7::vr

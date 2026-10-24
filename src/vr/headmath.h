@@ -29,4 +29,11 @@ void eye_space_transform(const Pose& eye_in_anchor, float unit_m, float out[12])
 // w = -z (camera looks down -z). out_x/out_y are dotted with (x, y, z, 1).
 void projection_rows(float left, float right, float bottom, float top, float out_x[4], float out_y[4]);
 
+// Pixel rectangle {left, top, right, bottom} of a WxH eye image that covers the game camera's
+// frustum (half-angle tangents tan_x, tan_y) as seen by an eye with shader transform `head`
+// (eye_space_transform) and projection rows px/py. Directions only (the frustum's apex is the
+// game camera; the eye offset is ignored). Empty when the frustum is entirely out of view.
+void frustum_scissor(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y, int width,
+                     int height, int out[4]);
+
 }  // namespace k7::vr

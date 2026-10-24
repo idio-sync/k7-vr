@@ -89,7 +89,36 @@ static void test_projection_edges() {
     CHECK_NEAR((py[1] * yb + py[2] * z) / -z, -1, 1e-5);
 }
 
+static void test_frustum_scissor() {
+    // Eye identical to the game camera: the game frustum fills the image.
+    float head[12];
+    eye_space_transform(identity(), 0.25f, head);
+    float px[4], py[4];
+    projection_rows(-0.6f, 0.6f, -0.5f, 0.5f, px, py);
+    int r[4];
+    frustum_scissor(head, px, py, 0.6f, 0.5f, 1920, 1440, r);
+    CHECK_NEAR(r[0], 0, 1);
+    CHECK_NEAR(r[1], 0, 1);
+    CHECK_NEAR(r[2], 1920, 1);
+    CHECK_NEAR(r[3], 1440, 1);
+    // Head turned 30 degrees right: the game frustum's right edge (+31 deg) is 1 deg right of the
+    // eye's centre: ndc = tan(atan(0.6) - 30 deg) / 0.6.
+    eye_space_transform(rotation_yaw_pitch(0.5236f, 0), 0.25f, head);
+    frustum_scissor(head, px, py, 0.6f, 0.5f, 1920, 1440, r);
+    CHECK_NEAR(r[0], 0, 1);
+    const double edge = std::tan(std::atan(0.6) - 0.5236) / 0.6;
+    CHECK_NEAR(r[2], (edge * 0.5 + 0.5) * 1920, 2);
+    // Head turned 120 degrees: the game frustum is out of view entirely.
+    eye_space_transform(rotation_yaw_pitch(2.1f, 0), 0.25f, head);
+    frustum_scissor(head, px, py, 0.6f, 0.5f, 1920, 1440, r);
+    if (r[2] - r[0] > 0 && r[3] - r[1] > 0 && !(r[0] == 0 && r[2] == 1920)) {
+        std::printf("turned away: rect %d,%d-%d,%d should be empty\n", r[0], r[1], r[2], r[3]);
+        ++g_failures;
+    }
+}
+
 int main() {
+    test_frustum_scissor();
     test_inverse_compose();
     test_yaw_turns_right();
     test_yaw_only_drops_pitch_and_roll();

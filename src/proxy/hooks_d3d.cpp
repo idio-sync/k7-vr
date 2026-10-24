@@ -10,9 +10,11 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
+#include "../vr/headmath.h"
 #include "../vr/vr.h"
 #include "ctx_wrap.h"
 #include "vtbl_index.h"
@@ -21,6 +23,8 @@ namespace k7 {
 
 // Private data on shader objects: their DXBC hash.
 static const GUID kShaderHashGuid = {0x6c1d3e0a, 0x4b7f, 0x4c55, {0x9a, 0x10, 0x2e, 0x77, 0x31, 0x5d, 0x0b, 0x01}};
+// Private data on shader objects: bitmask of declared texture slots.
+static const GUID kTextureSlotsGuid = {0x6c1d3e0a, 0x4b7f, 0x4c55, {0x9a, 0x10, 0x2e, 0x77, 0x31, 0x5d, 0x0b, 0x02}};
 
 // GX vertex template's cbuffer: projMatrix follows 64 + 32 + 64 float4 registers.
 constexpr UINT kProjOffset = (64 + 32 + 64) * 16;
@@ -34,6 +38,7 @@ static ID3D11DeviceContext* g_wrapped;  // what the game holds
 
 static std::unordered_map<ID3D11Resource*, std::vector<uint8_t>> g_cb;
 static float g_last_proj[16];  // the most recent perspective projMatrix the game wrote
+static std::unordered_map<ID3D11Resource*, int> g_cb_kind;  // template cbuffers: 1 perspective, 2 orthographic
 static std::unordered_map<ID3D11Resource*, void*> g_cb_mapped;
 
 static UINT constant_buffer_size(ID3D11Resource* res) {
@@ -181,31 +186,41 @@ static bool g_image_valid;
 
 // ---- Stereo ----
 // The patched vertex template reads each eye's head transform and projection rows from slot
-// b12 (vr::EyeConsts). While stereo is on (vr::stereo()), every draw into the scene target (a
-// render target with a same-sized depth buffer) is drawn twice: left eye into the game's
-// targets, right eye into mirror targets we own. Clears are mirrored too. Post passes and EFB
-// copies only see the left eye so far (milestone 2).
+// b12 (vr::EyeConsts). While stereo is on, every draw into a game render texture (anything but
+// the window's backbuffer) runs twice: the left eye as the game issued it, the right eye with
+// its render targets, depth buffer and sampled textures swapped for right-eye twins. Clears and
+// copies of twinned textures are mirrored, so post passes and EFB copies run per eye. HUD draws
+// (orthographic draws into the scene target after the frame's first perspective draw) go once
+// into a transparent overlay texture, shown on a panel in the headset. View-dependent effect
+// cards (known pixel shaders) are scissored to where the game camera's frustum lands in each eye.
 
 constexpr UINT kStereoSlot = 12;
+constexpr UINT kMaxTargets = 4;
+constexpr UINT kMaxTextures = 8;
 static ID3D11Buffer* g_eye_cb[2];  // left, right
+static vr::EyeConsts g_eyes[2];    // this frame's eyes
 static bool g_pair;                // save both eyes at the end of this frame
 static unsigned g_pair_index;
 
-struct MirrorView {
-    ID3D11Texture2D* tex = nullptr;
-    ID3D11View* view = nullptr;  // ID3D11RenderTargetView or ID3D11DepthStencilView
-};
-static std::unordered_map<ID3D11View*, MirrorView> g_mirrors;
-static ID3D11RenderTargetView* g_scene_rtv;  // last mirrored scene target (for `pair`)
+static std::unordered_map<ID3D11Resource*, ID3D11Texture2D*> g_twins;  // game texture -> right-eye twin
+static std::unordered_map<ID3D11View*, ID3D11View*> g_twin_views;     // game view -> same view of the twin
+
+static bool g_frame_3d;              // a perspective draw went into the scene target this frame
+static ID3D11Texture2D* g_scene_tex; // the scene target of this frame's last perspective draw (diagnostics)
+static ID3D11Texture2D* g_final[2];  // each eye's final image (the texture the game blits to the window)
+static ID3D11Texture2D* g_hud_tex;
+static ID3D11RenderTargetView* g_hud_rtv;
+static std::vector<uint64_t> g_card_ps;  // pixel shaders of view-dependent effect cards
+static bool g_card_skip;                 // [vr] card_mode=skip
+static std::unordered_map<ID3D11RasterizerState*, ID3D11RasterizerState*> g_scissor_states;
 
 // Before the game draws a frame: both eyes' transforms and projections (waits for headset
 // poses in OpenVR mode).
 static void set_eye_offsets() {
     if (!g_eye_cb[0] || !g_eye_cb[1]) return;
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
-    vr::EyeConsts eyes[2];
-    vr::begin_frame(ratio, eyes);
-    for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &eyes[eye], 0, 0);
+    vr::begin_frame(ratio, g_eyes);
+    for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &g_eyes[eye], 0, 0);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 }
 
@@ -221,68 +236,405 @@ static ID3D11Texture2D* texture_of(ID3D11View* view, D3D11_TEXTURE2D_DESC* desc)
     return tex;
 }
 
-static MirrorView* mirror_of(ID3D11View* view, bool depth) {
-    auto it = g_mirrors.find(view);
-    if (it != g_mirrors.end()) return &it->second;
+static ID3D11Texture2D* twin_tex(ID3D11Resource* res, bool create) {
+    if (!res || res == g_backbuffer) return nullptr;
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return nullptr;
     D3D11_TEXTURE2D_DESC d;
-    if (!texture_of(view, &d)) return nullptr;
-    MirrorView m;
-    d.MiscFlags = 0;
-    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &m.tex))) return nullptr;
-    HRESULT hr;
-    if (depth) {
-        D3D11_DEPTH_STENCIL_VIEW_DESC vd;
-        static_cast<ID3D11DepthStencilView*>(view)->GetDesc(&vd);
-        hr = g_dev->CreateDepthStencilView(m.tex, &vd, reinterpret_cast<ID3D11DepthStencilView**>(&m.view));
-    } else {
+    static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+    auto it = g_twins.find(res);
+    if (it != g_twins.end()) {
+        D3D11_TEXTURE2D_DESC t;
+        it->second->GetDesc(&t);
+        if (t.Width == d.Width && t.Height == d.Height && t.Format == d.Format && t.ArraySize == d.ArraySize)
+            return it->second;
+        // The game freed this texture and made a different one at the same address.
+        it->second->Release();
+        g_twins.erase(it);
+        for (auto& v : g_twin_views) v.second->Release();
+        g_twin_views.clear();
+    }
+    // Only textures that can be sampled later need a per-eye copy (this also skips the backbuffer,
+    // whose pointer isn't known until the first Present).
+    if (!create || d.Usage != D3D11_USAGE_DEFAULT || !(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) return nullptr;
+    d.MiscFlags &= ~UINT(D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
+                         D3D11_RESOURCE_MISC_GDI_COMPATIBLE);
+    ID3D11Texture2D* twin = nullptr;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &twin))) return nullptr;
+    logf("stereo: twin %ux%u f%d bind 0x%x", d.Width, d.Height, d.Format, d.BindFlags);
+    g_twins[res] = twin;
+    return twin;
+}
+
+// The same view on the right-eye twin of the view's texture. With create=false only existing
+// twins are used (sampled textures that no eye ever rendered to stay shared).
+template <typename V>
+static V* twin_view(V* view, bool create) {
+    auto it = g_twin_views.find(view);
+    if (it != g_twin_views.end()) return static_cast<V*>(it->second);
+    ID3D11Resource* res = nullptr;
+    view->GetResource(&res);
+    res->Release();
+    ID3D11Texture2D* twin = twin_tex(res, create);
+    if (!twin) return nullptr;
+    V* out = nullptr;
+    HRESULT hr = E_FAIL;
+    if constexpr (std::is_same_v<V, ID3D11RenderTargetView>) {
         D3D11_RENDER_TARGET_VIEW_DESC vd;
-        static_cast<ID3D11RenderTargetView*>(view)->GetDesc(&vd);
-        hr = g_dev->CreateRenderTargetView(m.tex, &vd, reinterpret_cast<ID3D11RenderTargetView**>(&m.view));
+        view->GetDesc(&vd);
+        hr = g_dev->CreateRenderTargetView(twin, &vd, &out);
+    } else if constexpr (std::is_same_v<V, ID3D11DepthStencilView>) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC vd;
+        view->GetDesc(&vd);
+        hr = g_dev->CreateDepthStencilView(twin, &vd, &out);
+    } else {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd;
+        view->GetDesc(&vd);
+        hr = g_dev->CreateShaderResourceView(twin, &vd, &out);
     }
-    if (FAILED(hr)) {
-        m.tex->Release();
-        return nullptr;
-    }
-    logf("stereo: mirror %s %ux%u f%d", depth ? "depth" : "target", d.Width, d.Height, d.Format);
-    return &g_mirrors.emplace(view, m).first->second;
+    if (FAILED(hr)) return nullptr;
+    g_twin_views[view] = out;
+    return out;
 }
 
-// Returns true and fills the mirror views when the current targets are a scene target pair.
-static bool scene_mirrors(ID3D11RenderTargetView** rtv, ID3D11DepthStencilView** dsv, MirrorView** mrt,
-                          MirrorView** mds) {
-    g_ctx->OMGetRenderTargets(1, rtv, dsv);
-    bool ok = false;
-    if (*rtv && *dsv) {
-        D3D11_TEXTURE2D_DESC rd, dd;
-        if (texture_of(*rtv, &rd) && texture_of(*dsv, &dd) && rd.Width == dd.Width && rd.Height == dd.Height) {
-            *mrt = mirror_of(*rtv, false);
-            *mds = mirror_of(*dsv, true);
-            ok = *mrt && *mds;
+// 1 = perspective GX draw, 2 = orthographic GX draw, 0 = other (post passes, fixed shaders).
+static int draw_kind() {
+    ID3D11Buffer* cb = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb);
+    if (!cb) return 0;
+    auto it = g_cb_kind.find(cb);
+    cb->Release();
+    return it == g_cb_kind.end() ? 0 : it->second;
+}
+
+static bool hud_target_like(ID3D11RenderTargetView* rtv) {
+    D3D11_TEXTURE2D_DESC d;
+    if (!texture_of(rtv, &d)) return false;
+    if (g_hud_tex) {
+        D3D11_TEXTURE2D_DESC have;
+        g_hud_tex->GetDesc(&have);
+        if (have.Width == d.Width && have.Height == d.Height && have.Format == d.Format) return true;
+        g_hud_rtv->Release();
+        g_hud_tex->Release();
+        g_hud_tex = nullptr;
+    }
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.SampleDesc = {1, 0};
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    d.CPUAccessFlags = 0;
+    d.MiscFlags = 0;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_hud_tex))) return false;
+    if (FAILED(g_dev->CreateRenderTargetView(g_hud_tex, nullptr, &g_hud_rtv))) {
+        g_hud_tex->Release();
+        g_hud_tex = nullptr;
+        return false;
+    }
+    const float clear[4] = {0, 0, 0, 0};
+    g_ctx->ClearRenderTargetView(g_hud_rtv, clear);
+    logf("stereo: HUD overlay %ux%u", d.Width, d.Height);
+    return true;
+}
+
+// True when the bound pixel shader samples a texture an eye rendered (a full-screen effect over
+// the scene, e.g. the dimmed frame copy behind a name card) rather than HUD artwork.
+static bool samples_eye_image() {
+    // Only the slots the pixel shader declares; other slots may hold stale bindings.
+    uint32_t slots = 0xFFFFFFFF;
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (ps) {
+        UINT size = sizeof(slots);
+        if (FAILED(ps->GetPrivateData(kTextureSlotsGuid, &size, &slots))) slots = 0xFFFFFFFF;
+        ps->Release();
+    }
+    ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+    bool eye = false;
+    for (UINT i = 0; i < kMaxTextures; ++i) {
+        ID3D11ShaderResourceView* s = srv[i];
+        if (!s) continue;
+        if (!eye && (slots & (1u << i))) {
+            ID3D11Resource* res = nullptr;
+            s->GetResource(&res);
+            eye = twin_tex(res, false) != nullptr;
+            res->Release();
         }
+        s->Release();
     }
-    return ok;
+    return eye;
 }
 
-// Runs `draw` for the left eye, then again for the right eye into the mirror targets.
+// HUD artwork (sprites, text) samples a texture; untextured full-screen quads are dims, fades
+// and flashes that belong to the eyes.
+static bool pixel_shader_textured() {
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (!ps) return false;
+    uint32_t slots = 0xFFFFFFFF;
+    UINT size = sizeof(slots);
+    if (FAILED(ps->GetPrivateData(kTextureSlotsGuid, &size, &slots))) slots = 0xFFFFFFFF;
+    ps->Release();
+    return slots != 0;
+}
+
+// Draws that write depth are scene work (e.g. the full-screen quads that clear the scene
+// target after a reflection pre-pass), never HUD.
+static bool writes_depth() {
+    ID3D11DepthStencilState* ds = nullptr;
+    UINT ref = 0;
+    g_ctx->OMGetDepthStencilState(&ds, &ref);
+    if (!ds) return true;  // default state: depth test and writes on
+    D3D11_DEPTH_STENCIL_DESC d;
+    ds->GetDesc(&d);
+    ds->Release();
+    return d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
+}
+
+static bool is_card_shader() {
+    if (g_card_ps.empty()) return false;
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    const uint64_t h = shader_hash(ps);
+    if (ps) ps->Release();
+    for (uint64_t c : g_card_ps)
+        if (c == h) return true;
+    return false;
+}
+
+// HUD draws render over a transparent overlay, but the game's blending doesn't write alpha.
+// Same colour blending, and alpha = max(source alpha, existing) so the overlay gets coverage
+// (colour ends up premultiplied, since the overlay starts black). Opaque draws write alpha 1.
+static std::unordered_map<ID3D11BlendState*, ID3D11BlendState*> g_hud_blend_states;
+
+template <typename DrawFn>
+static void draw_hud(DrawFn draw) {
+    ID3D11BlendState* bs = nullptr;
+    FLOAT factor[4];
+    UINT mask = 0;
+    g_ctx->OMGetBlendState(&bs, factor, &mask);
+    ID3D11BlendState*& hud_bs = g_hud_blend_states[bs];
+    if (!hud_bs) {
+        D3D11_BLEND_DESC d{};
+        d.RenderTarget[0] = {FALSE, D3D11_BLEND_ONE, D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE,
+                             D3D11_BLEND_ZERO, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL};
+        if (bs) bs->GetDesc(&d);
+        auto& rt = d.RenderTarget[0];
+        if (!rt.BlendEnable) {  // opaque: colour as before (src), alpha forced to 1 via the blend factor
+            rt.BlendEnable = TRUE;
+            rt.SrcBlend = D3D11_BLEND_ONE;
+            rt.DestBlend = D3D11_BLEND_ZERO;
+            rt.BlendOp = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha = D3D11_BLEND_BLEND_FACTOR;
+        } else {
+            rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+        }
+        rt.DestBlendAlpha = D3D11_BLEND_ONE;
+        rt.BlendOpAlpha = D3D11_BLEND_OP_MAX;
+        rt.RenderTargetWriteMask |= D3D11_COLOR_WRITE_ENABLE_ALPHA;
+        d.IndependentBlendEnable = FALSE;
+        g_dev->CreateBlendState(&d, &hud_bs);
+    }
+    const FLOAT one[4] = {1, 1, 1, 1};
+    g_ctx->OMSetBlendState(hud_bs, one, mask);
+    draw();
+    g_ctx->OMSetBlendState(bs, factor, mask);
+    if (bs) bs->Release();
+}
+
+// Draws with a scissor limited to where the game camera's (intended) frustum lands in `eye`.
+template <typename DrawFn>
+static void draw_scissored(int eye, DrawFn draw) {
+    const float intended = fov_inflate_intended();
+    const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
+    D3D11_VIEWPORT vp;
+    UINT nvp = 1;
+    g_ctx->RSGetViewports(&nvp, &vp);
+    if (intended <= 0 || ratio <= 0 || nvp == 0) {
+        draw();
+        return;
+    }
+    const float tan_y = tanf(intended * 3.14159265f / 360);
+    int r[4];
+    vr::frustum_scissor(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, tan_y * ratio, tan_y, int(vp.Width),
+                        int(vp.Height), r);
+    if (r[2] <= r[0] || r[3] <= r[1]) return;  // the card's view is entirely outside this eye
+    ID3D11RasterizerState* rs = nullptr;
+    g_ctx->RSGetState(&rs);
+    ID3D11RasterizerState*& scissor_rs = g_scissor_states[rs];
+    if (!scissor_rs) {
+        D3D11_RASTERIZER_DESC rd{D3D11_FILL_SOLID, D3D11_CULL_BACK, FALSE, 0, 0.f, 0.f, TRUE, FALSE, FALSE, FALSE};
+        if (rs) rs->GetDesc(&rd);
+        rd.ScissorEnable = TRUE;
+        g_dev->CreateRasterizerState(&rd, &scissor_rs);
+    }
+    D3D11_RECT old[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    UINT nold = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    g_ctx->RSGetScissorRects(&nold, old);
+    const D3D11_RECT rect{LONG(vp.TopLeftX) + r[0], LONG(vp.TopLeftY) + r[1], LONG(vp.TopLeftX) + r[2],
+                          LONG(vp.TopLeftY) + r[3]};
+    g_ctx->RSSetScissorRects(1, &rect);
+    g_ctx->RSSetState(scissor_rs);
+    draw();
+    g_ctx->RSSetState(rs);
+    g_ctx->RSSetScissorRects(nold, nold ? old : nullptr);
+    if (rs) rs->Release();
+}
+
+static void note_final_source() {
+    ID3D11ShaderResourceView* srv = nullptr;
+    g_ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv) return;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    srv->Release();
+    res->Release();  // the game keeps it alive
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return;
+    g_final[0] = static_cast<ID3D11Texture2D*>(res);
+    g_final[1] = twin_tex(res, false);
+}
+
+// Runs `draw` for the left eye, then for the right eye on twins (see the section comment).
 template <typename DrawFn>
 static void draw_stereo(DrawFn draw) {
-    draw();
-    if (!vr::stereo()) return;
-    ID3D11RenderTargetView* rtv = nullptr;
-    ID3D11DepthStencilView* dsv = nullptr;
-    MirrorView* mrt = nullptr;
-    MirrorView* mds = nullptr;
-    if (scene_mirrors(&rtv, &dsv, &mrt, &mds)) {
-        auto mirror_rtv = static_cast<ID3D11RenderTargetView*>(mrt->view);
-        g_ctx->OMSetRenderTargets(1, &mirror_rtv, static_cast<ID3D11DepthStencilView*>(mds->view));
-        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[1]);
+    if (!vr::stereo()) {
         draw();
-        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
-        g_ctx->OMSetRenderTargets(1, &rtv, dsv);
-        g_scene_rtv = rtv;
+        return;
     }
-    if (rtv) rtv->Release();
-    if (dsv) dsv->Release();
+    ID3D11RenderTargetView* rtv[kMaxTargets] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    g_ctx->OMGetRenderTargets(kMaxTargets, rtv, &dsv);
+    auto release_targets = [&] {
+        for (auto v : rtv)
+            if (v) v->Release();
+        if (dsv) dsv->Release();
+    };
+    ID3D11Resource* rt0 = nullptr;
+    if (rtv[0]) {
+        rtv[0]->GetResource(&rt0);
+        rt0->Release();
+    }
+    if (!rtv[0] || rt0 == g_backbuffer) {  // the blit to the window: once
+        if (rt0) note_final_source();
+        draw();
+        release_targets();
+        return;
+    }
+
+    const int kind = draw_kind();
+    bool scene = false;
+    if (dsv) {
+        D3D11_TEXTURE2D_DESC rd, dd;
+        scene = texture_of(rtv[0], &rd) && texture_of(dsv, &dd) && rd.Width == dd.Width && rd.Height == dd.Height;
+    }
+    if (scene && kind == 1) {
+        g_frame_3d = true;
+        D3D11_TEXTURE2D_DESC sd;
+        g_scene_tex = texture_of(rtv[0], &sd);
+    }
+    const bool eye_image = scene && kind == 2 && samples_eye_image();
+    if (eye_image && !g_frame_3d) {
+        // A screen-fixed backdrop made from last frame's image (drawn before the 3D scene, which
+        // normally covers it). With head tracking it shows wherever geometry doesn't: skip it.
+        release_targets();
+        return;
+    }
+    if (scene && kind == 2 && g_frame_3d && !eye_image && !writes_depth() && pixel_shader_textured() &&
+        hud_target_like(rtv[0])) {  // HUD: once, into the overlay
+        g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
+        draw_hud(draw);
+        g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+        release_targets();
+        return;
+    }
+    const bool card = kind == 1 && is_card_shader();
+    if (card && g_card_skip) {  // card_mode=skip: view-dependent cards are left out in stereo
+        release_targets();
+        return;
+    }
+
+    // Left eye: as issued.
+    if (card)
+        draw_scissored(0, draw);
+    else
+        draw();
+
+    // Right eye: twins for targets, depth and any sampled texture an eye rendered.
+    ID3D11RenderTargetView* trtv[kMaxTargets] = {};
+    bool ok = true;
+    for (UINT i = 0; i < kMaxTargets; ++i)
+        if (rtv[i] && !(trtv[i] = twin_view(rtv[i], true))) ok = false;
+    ID3D11DepthStencilView* tdsv = dsv ? twin_view(dsv, true) : nullptr;
+    if (dsv && !tdsv) ok = false;
+    if (ok) {
+        ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+        ID3D11ShaderResourceView* tsrv[kMaxTextures] = {};
+        g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+        bool swapped = false;
+        for (UINT i = 0; i < kMaxTextures; ++i) {
+            tsrv[i] = srv[i];
+            if (srv[i])
+                if (auto t = twin_view(srv[i], false)) tsrv[i] = t, swapped = true;
+        }
+        g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
+        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, tsrv);
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[1]);
+        if (card)
+            draw_scissored(1, draw);
+        else
+            draw();
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
+        g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+        for (auto s : srv)
+            if (s) s->Release();
+    }
+    release_targets();
+}
+
+// Clears and copies of twinned textures happen to the twins too.
+static void mirror_clear_rtv(ID3D11RenderTargetView* rtv, const FLOAT color[4]) {
+    if (!vr::stereo() || !rtv) return;
+    if (auto t = twin_view(rtv, false)) g_ctx->ClearRenderTargetView(t, color);
+}
+
+static void mirror_clear_dsv(ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
+    if (!vr::stereo() || !dsv) return;
+    if (auto t = twin_view(dsv, false)) g_ctx->ClearDepthStencilView(t, flags, depth, stencil);
+}
+
+static void mirror_copy(ID3D11Resource* dst, UINT dsub, UINT x, UINT y, UINT z, ID3D11Resource* src, UINT ssub,
+                        const D3D11_BOX* box, bool whole) {
+    if (!vr::stereo()) return;
+    ID3D11Texture2D* tsrc = twin_tex(src, false);
+    ID3D11Texture2D* tdst = twin_tex(dst, tsrc != nullptr);  // copying an eye's image makes the target per-eye
+    if (!tdst) return;
+    ID3D11Resource* from = tsrc ? static_cast<ID3D11Resource*>(tsrc) : src;
+    if (whole)
+        g_ctx->CopyResource(tdst, from);
+    else
+        g_ctx->CopySubresourceRegion(tdst, dsub, x, y, z, from, ssub, box);
+}
+
+static void load_card_list() {
+    wchar_t buf[512];
+    GetPrivateProfileStringW(L"vr", L"cards", L"d358d9e91e34870e", buf, 512, path_in(L"k7vr.ini").c_str());
+    for (wchar_t* p = buf; *p;) {
+        wchar_t* end = nullptr;
+        const uint64_t h = _wcstoui64(p, &end, 16);
+        if (end == p) break;
+        g_card_ps.push_back(h);
+        p = end;
+        while (*p == L',' || *p == L' ') ++p;
+    }
+    wchar_t mode[16];
+    GetPrivateProfileStringW(L"vr", L"card_mode", L"scissor", mode, 16, path_in(L"k7vr.ini").c_str());
+    g_card_skip = _wcsicmp(mode, L"skip") == 0;
+    logf("stereo: %zu effect-card shader(s), %s", g_card_ps.size(), g_card_skip ? "skipped" : "scissored");
 }
 
 static void grab_final_source() {
@@ -378,7 +730,9 @@ static void STDMETHODCALLTYPE w_Unmap(ID3D11DeviceContext* c, ID3D11Resource* re
         g_cb_mapped.erase(it);
         if (size >= kTemplateCbMin) {
             auto p = reinterpret_cast<const float*>(src + kProjOffset);
-            if (p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0) memcpy(g_last_proj, p, sizeof(g_last_proj));
+            const bool persp = p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0;
+            if (persp) memcpy(g_last_proj, p, sizeof(g_last_proj));
+            g_cb_kind[res] = persp ? 1 : (p[15] == 1 ? 2 : 0);
         }
     }
     real_of(c)->Unmap(res, sub);
@@ -396,7 +750,9 @@ static void STDMETHODCALLTYPE w_UpdateSubresource(ID3D11DeviceContext* c, ID3D11
             if (left < right) memcpy(shadow.data() + left, src, right - left);
             if (size >= kTemplateCbMin && left == 0 && right >= kTemplateCbMin) {
                 auto p = reinterpret_cast<const float*>(shadow.data() + kProjOffset);
-                if (p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0) memcpy(g_last_proj, p, sizeof(g_last_proj));
+                const bool persp = p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0;
+                if (persp) memcpy(g_last_proj, p, sizeof(g_last_proj));
+                g_cb_kind[dst] = persp ? 1 : (p[15] == 1 ? 2 : 0);
             }
         } else if (g_cap.active) {
             appendf(g_cap.text, "     UpdateSubresource");
@@ -414,8 +770,7 @@ static void STDMETHODCALLTYPE w_ClearRTV(ID3D11DeviceContext* c, ID3D11RenderTar
         appendf(g_cap.text, " color=%g,%g,%g,%g\n", color[0], color[1], color[2], color[3]);
     }
     real_of(c)->ClearRenderTargetView(rtv, color);
-    if (auto it = g_mirrors.find(rtv); it != g_mirrors.end())
-        g_ctx->ClearRenderTargetView(static_cast<ID3D11RenderTargetView*>(it->second.view), color);
+    mirror_clear_rtv(rtv, color);
 }
 
 static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthStencilView* dsv, UINT flags, FLOAT d,
@@ -426,8 +781,7 @@ static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthSten
         appendf(g_cap.text, " flags=%u depth=%g\n", flags, d);
     }
     real_of(c)->ClearDepthStencilView(dsv, flags, d, st);
-    if (auto it = g_mirrors.find(dsv); it != g_mirrors.end())
-        g_ctx->ClearDepthStencilView(static_cast<ID3D11DepthStencilView*>(it->second.view), flags, d, st);
+    mirror_clear_dsv(dsv, flags, d, st);
 }
 
 static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID3D11Resource* dst, UINT dsub, UINT x,
@@ -441,6 +795,7 @@ static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID
         appendf(g_cap.text, " at=%u,%u\n", x, y);
     }
     real_of(c)->CopySubresourceRegion(dst, dsub, x, y, z, src, ssub, box);
+    mirror_copy(dst, dsub, x, y, z, src, ssub, box, false);
 }
 
 static void STDMETHODCALLTYPE w_CopyResource(ID3D11DeviceContext* c, ID3D11Resource* dst, ID3D11Resource* src) {
@@ -451,6 +806,7 @@ static void STDMETHODCALLTYPE w_CopyResource(ID3D11DeviceContext* c, ID3D11Resou
         g_cap.text += '\n';
     }
     real_of(c)->CopyResource(dst, src);
+    mirror_copy(dst, 0, 0, 0, 0, src, 0, nullptr, true);
 }
 
 static void STDMETHODCALLTYPE w_ExecuteCommandList(ID3D11DeviceContext* c, ID3D11CommandList* list, BOOL restore) {
@@ -479,9 +835,38 @@ static CreateDeferredContext_t o_CreateDeferredContext;
 static GetImmediateContext_t o_GetImmediateContext;
 static unsigned g_shader_count;
 
+// Bit i set when the shader declares a texture at register t<i> (from the DXBC RDEF chunk).
+static uint32_t texture_slots(const void* bc, SIZE_T len) {
+    auto b = static_cast<const uint8_t*>(bc);
+    auto u32 = [&](size_t off) {
+        uint32_t v = 0;
+        if (off + 4 <= len) memcpy(&v, b + off, 4);
+        return v;
+    };
+    if (len < 32 || memcmp(b, "DXBC", 4) != 0) return 0xFFFFFFFF;
+    const uint32_t chunks = u32(28);
+    for (uint32_t c = 0; c < chunks; ++c) {
+        const uint32_t off = u32(32 + 4 * c);
+        if (memcmp(b + off, "RDEF", 4) != 0) continue;
+        const size_t data = off + 8;
+        const uint32_t count = u32(data + 8), table = u32(data + 12);
+        uint32_t mask = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            const size_t e = data + table + 32 * i;  // D3D11_SHADER_INPUT_BIND_DESC layout in the chunk
+            const uint32_t type = u32(e + 4), point = u32(e + 20), n = u32(e + 24);
+            if (type == 2 /* D3D_SIT_TEXTURE */)
+                for (uint32_t k = 0; k < n && point + k < 32; ++k) mask |= 1u << (point + k);
+        }
+        return mask;
+    }
+    return 0xFFFFFFFF;  // no reflection data: assume every slot
+}
+
 static void tag_shader(ID3D11DeviceChild* shader, const void* bc, SIZE_T len) {
     uint64_t h = dxbc_hash(bc, len);
     shader->SetPrivateData(kShaderHashGuid, sizeof(h), &h);
+    const uint32_t slots = texture_slots(bc, len);
+    shader->SetPrivateData(kTextureSlotsGuid, sizeof(slots), &slots);
     ++g_shader_count;
 }
 
@@ -524,7 +909,8 @@ using Present1_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, con
 static Present_t o_Present;
 static Present1_t o_Present1;
 
-static void save_texture(ID3D11Texture2D* tex, const std::wstring& path) {
+// alpha_only: write the alpha channel as greyscale (RGBA8 textures), to check overlay transparency.
+static void save_texture(ID3D11Texture2D* tex, const std::wstring& path, bool alpha_only = false) {
     D3D11_TEXTURE2D_DESC d;
     tex->GetDesc(&d);
     ID3D11Texture2D* src = tex;
@@ -565,6 +951,10 @@ static void save_texture(ID3D11Texture2D* tex, const std::wstring& path) {
                             break;
                         case DXGI_FORMAT_R8G8B8A8_UNORM:
                         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                            if (alpha_only) {
+                                dst[x * 4 + 0] = dst[x * 4 + 1] = dst[x * 4 + 2] = row[x * 4 + 3];
+                                break;
+                            }
                             dst[x * 4 + 0] = row[x * 4 + 2];
                             dst[x * 4 + 1] = row[x * 4 + 1];
                             dst[x * 4 + 2] = row[x * 4 + 0];
@@ -673,29 +1063,60 @@ static void end_frame(IDXGISwapChain* sc) {
         save_frame_image(sc, path_in(name));
         logf("screenshot %ls", name);
     }
-    // Both eyes of the frame just drawn: the game's scene target (left) and its mirror (right).
-    ID3D11Texture2D* eye_tex[2] = {};
-    if (vr::stereo() && g_scene_rtv) {
-        auto it = g_mirrors.find(g_scene_rtv);
-        D3D11_TEXTURE2D_DESC d;
-        if (it != g_mirrors.end()) {
-            eye_tex[0] = texture_of(g_scene_rtv, &d);
-            eye_tex[1] = it->second.tex;
-        }
-    }
-    if (eye_tex[0]) vr::submit(eye_tex[0], eye_tex[1]);
-    if (g_pair) {
-        g_pair = false;
-        if (eye_tex[0]) {
-            wchar_t name[64];
-            swprintf(name, 64, L"pair_%03u_L.png", g_pair_index);
-            save_texture(eye_tex[0], path_in(name));
-            swprintf(name, 64, L"pair_%03u_R.png", g_pair_index);
-            save_texture(eye_tex[1], path_in(name));
-            logf("pair %u written", g_pair_index++);
+    // Hand the frame just drawn to the headset. 3D frames: each eye's final image and the HUD.
+    // 2D frames (no perspective draw: menus, FMVs, loading): black eyes, the mono image on a screen.
+    if (vr::stereo()) {
+        ID3D11Texture2D* left = nullptr;
+        ID3D11Texture2D* right = nullptr;
+        ID3D11Texture2D* screen = nullptr;
+        if (g_frame_3d && g_final[0]) {
+            left = g_final[0];
+            right = g_final[1] ? g_final[1] : g_final[0];
         } else {
-            logf("pair: stereo is off or no scene target was mirrored this frame");
+            screen = g_final[0];
         }
+        ID3D11Texture2D* hud = g_frame_3d ? g_hud_tex : nullptr;
+        vr::present(left, right, hud, screen);
+        if (g_pair) {
+            g_pair = false;
+            wchar_t name[64];
+            if (left) {
+                swprintf(name, 64, L"pair_%03u_L.png", g_pair_index);
+                save_texture(left, path_in(name));
+                swprintf(name, 64, L"pair_%03u_R.png", g_pair_index);
+                save_texture(right, path_in(name));
+            }
+            if (g_scene_tex && left) {
+                swprintf(name, 64, L"pair_%03u_scene_L.png", g_pair_index);
+                save_texture(g_scene_tex, path_in(name));
+                if (ID3D11Texture2D* t = twin_tex(g_scene_tex, false)) {
+                    swprintf(name, 64, L"pair_%03u_scene_R.png", g_pair_index);
+                    save_texture(t, path_in(name));
+                }
+            }
+            if (hud) {
+                swprintf(name, 64, L"pair_%03u_hud.png", g_pair_index);
+                save_texture(hud, path_in(name));
+                swprintf(name, 64, L"pair_%03u_hud_alpha.png", g_pair_index);
+                save_texture(hud, path_in(name), true);
+            }
+            if (screen) {
+                swprintf(name, 64, L"pair_%03u_screen.png", g_pair_index);
+                save_texture(screen, path_in(name));
+            }
+            logf("pair %u written (%s frame%s)", g_pair_index++, g_frame_3d ? "3D" : "2D",
+                 g_final[1] || !left ? "" : ", right eye had no twin");
+        }
+        g_frame_3d = false;
+        g_final[0] = g_final[1] = nullptr;
+        g_scene_tex = nullptr;
+        if (g_hud_rtv) {
+            const float clear[4] = {0, 0, 0, 0};
+            g_ctx->ClearRenderTargetView(g_hud_rtv, clear);
+        }
+    } else if (g_pair) {
+        g_pair = false;
+        logf("pair: stereo is off");
     }
 
     Requests req = control_poll();
@@ -831,6 +1252,7 @@ static void hook_device(ID3D11Device* dev) {
     dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
     vr::init(dev, g_ctx);
+    load_card_list();
 
     g_wrapped = wrap_context(g_ctx);
     wrap(vt::ctx_DrawIndexed, &w_DrawIndexed);
