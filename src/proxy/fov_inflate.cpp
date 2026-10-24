@@ -1,8 +1,8 @@
 // FOV inflation: the game frustum-culls against its camera's FOV, so looking around in VR
 // would show unsubmitted geometry. The camera manager copies the FOV into the render camera
 // at exe+10301a (`movss [eax+0x40], xmm0`); a stub there records the intended FOV and writes
-// an inflated one instead. The patched vertex shader then scales clip x/y by
-// tan(inflated/2) / tan(intended/2) so the picture keeps the intended framing.
+// an inflated one instead. The patched vertex shader then projects perspective draws with
+// the intended FOV (flat) or the headset's projection (VR), so framing is unaffected.
 #include "common.h"
 
 #include <cmath>
@@ -74,11 +74,7 @@ void set_fov_inflate(float degrees) {
     logf("fov_inflate %g", degrees);
 }
 
-// Clip-space x/y scale that restores the intended framing (1 when not inflating).
-float fov_inflate_scale() {
-    if (!g_patched || g_inflated <= 0 || g_intended <= 0) return 1;
-    const float d2r = 3.14159265f / 360;
-    return tanf(g_inflated * d2r) / tanf(g_intended * d2r);
-}
+// The FOV the game meant to use this frame (degrees), or 0 when not inflating.
+float fov_inflate_intended() { return (g_patched && g_inflated > 0) ? g_intended : 0; }
 
 }  // namespace k7

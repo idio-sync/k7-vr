@@ -2,9 +2,10 @@
 // the next frame boundary. One command per line:
 //   capture                 next frame's draw list + PNG (also F10)
 //   shot                    PNG of the next frame
-//   stereo SEP              alternate eyes every frame, SEP apart in GX eye-space units (0 = off)
-//   view YAW PITCH          free look from the game camera, degrees (+yaw right, +pitch up)
-//   pair                    PNGs of the next two frames, named by eye (pair_NNN_L/R.png)
+//   stereo IPD_M            simulated headset (vr sim mode) with that eye separation in metres; 0 = off
+//   recenter / unit M       recentre the VR view / set metres per game unit
+//   view YAW PITCH          simulated head direction from the game camera, degrees (+yaw right, +pitch up)
+//   pair                    PNGs of both eyes of the next frame (pair_NNN_L/R.png)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
 //   dumpf ADDR N [TAG] / dumpptr PTR OFF N TAG   log N floats (memscan.cpp)
@@ -24,6 +25,7 @@
 // Steps (all but log/activate) run in order, each for its duration; shot/capture take no time. Pad input is ORed into player 1's pad; keys
 // are posted to the game window as WM_INPUT (see hooks_input.cpp), so it needn't have focus.
 #include "common.h"
+#include "../vr/vr.h"
 
 #include <xinput.h>
 
@@ -243,6 +245,12 @@ static void run_line(const std::string& line) {
         int hits = 8;
         ss >> index >> hits;
         g_steps.push_back(Step{.action = [=] { mem_watchhit(index, hits); }});
+    } else if (cmd == "recenter") {
+        g_steps.push_back(Step{.action = [] { vr::recenter(); }});
+    } else if (cmd == "unit") {
+        float m = 0.25f;
+        ss >> m;
+        g_steps.push_back(Step{.action = [=] { vr::set_unit(m); }});
     } else if (cmd == "fov_inflate") {
         float deg = 0;
         ss >> deg;

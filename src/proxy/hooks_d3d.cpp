@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../vr/vr.h"
 #include "ctx_wrap.h"
 #include "vtbl_index.h"
 
@@ -178,15 +179,15 @@ static bool g_want_image;                // this frame's image is wanted (shot o
 static ID3D11Texture2D* g_image;         // our copy of the final blit's source
 static bool g_image_valid;
 
-// ---- Desktop stereo test ----
-// The patched vertex template reads an eye offset from slot b12. With a separation set, every
-// draw into the scene target (a render target with a same-sized depth buffer) is drawn twice:
-// left eye into the game's targets, right eye into mirror targets we own. Clears are mirrored
-// too. Post passes and EFB copies only see the left eye; that's fine for a probe.
+// ---- Stereo ----
+// The patched vertex template reads each eye's head transform and projection rows from slot
+// b12 (vr::EyeConsts). While stereo is on (vr::stereo()), every draw into the scene target (a
+// render target with a same-sized depth buffer) is drawn twice: left eye into the game's
+// targets, right eye into mirror targets we own. Clears are mirrored too. Post passes and EFB
+// copies only see the left eye so far (milestone 2).
 
 constexpr UINT kStereoSlot = 12;
 static ID3D11Buffer* g_eye_cb[2];  // left, right
-static float g_sep;                // eye separation in GX eye-space units; 0 = mono
 static bool g_pair;                // save both eyes at the end of this frame
 static unsigned g_pair_index;
 
@@ -197,23 +198,14 @@ struct MirrorView {
 static std::unordered_map<ID3D11View*, MirrorView> g_mirrors;
 static ID3D11RenderTargetView* g_scene_rtv;  // last mirrored scene target (for `pair`)
 
-static float g_yaw, g_pitch;  // free look from the game camera, degrees (+yaw right, +pitch up)
-
-// Eye-space transform per eye: undo the head rotation, then the eye offset.
+// Before the game draws a frame: both eyes' transforms and projections (waits for headset
+// poses in OpenVR mode).
 static void set_eye_offsets() {
-    const float d2r = 3.14159265f / 180;
-    const float cy = cosf(g_yaw * d2r), sy = sinf(g_yaw * d2r);
-    const float cp = cosf(g_pitch * d2r), sp = sinf(g_pitch * d2r);
-    for (int eye = 0; eye < 2; ++eye) {
-        if (!g_eye_cb[eye]) return;
-        const float offset = g_sep <= 0 ? 0 : (eye == 0 ? g_sep / 2 : -g_sep / 2);  // scene moves opposite to the eye
-        const float s = fov_inflate_scale();
-        const float m[16] = {cy,       0,   sy,      offset,  //
-                             -sp * sy, cp,  sp * cy, 0,       //
-                             -cp * sy, -sp, cp * cy, 0,       //
-                             s,        s,   0,       0};
-        g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, m, 0, 0);
-    }
+    if (!g_eye_cb[0] || !g_eye_cb[1]) return;
+    const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
+    vr::EyeConsts eyes[2];
+    vr::begin_frame(ratio, eyes);
+    for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &eyes[eye], 0, 0);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 }
 
@@ -275,7 +267,7 @@ static bool scene_mirrors(ID3D11RenderTargetView** rtv, ID3D11DepthStencilView**
 template <typename DrawFn>
 static void draw_stereo(DrawFn draw) {
     draw();
-    if (g_sep <= 0) return;
+    if (!vr::stereo()) return;
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
     MirrorView* mrt = nullptr;
@@ -681,17 +673,26 @@ static void end_frame(IDXGISwapChain* sc) {
         save_frame_image(sc, path_in(name));
         logf("screenshot %ls", name);
     }
+    // Both eyes of the frame just drawn: the game's scene target (left) and its mirror (right).
+    ID3D11Texture2D* eye_tex[2] = {};
+    if (vr::stereo() && g_scene_rtv) {
+        auto it = g_mirrors.find(g_scene_rtv);
+        D3D11_TEXTURE2D_DESC d;
+        if (it != g_mirrors.end()) {
+            eye_tex[0] = texture_of(g_scene_rtv, &d);
+            eye_tex[1] = it->second.tex;
+        }
+    }
+    if (eye_tex[0]) vr::submit(eye_tex[0], eye_tex[1]);
     if (g_pair) {
         g_pair = false;
-        auto it = g_scene_rtv ? g_mirrors.find(g_scene_rtv) : g_mirrors.end();
-        if (g_sep > 0 && it != g_mirrors.end()) {
-            D3D11_TEXTURE2D_DESC d;
+        if (eye_tex[0]) {
             wchar_t name[64];
             swprintf(name, 64, L"pair_%03u_L.png", g_pair_index);
-            save_texture(texture_of(g_scene_rtv, &d), path_in(name));
+            save_texture(eye_tex[0], path_in(name));
             swprintf(name, 64, L"pair_%03u_R.png", g_pair_index);
-            save_texture(it->second.tex, path_in(name));
-            logf("pair %u written (separation %g)", g_pair_index++, g_sep);
+            save_texture(eye_tex[1], path_in(name));
+            logf("pair %u written", g_pair_index++);
         } else {
             logf("pair: stereo is off or no scene target was mirrored this frame");
         }
@@ -705,13 +706,12 @@ static void end_frame(IDXGISwapChain* sc) {
     if (req.shot) g_cap.shot = true;
     if (req.pair) g_pair = true;
     if (req.view) {
-        g_yaw = req.yaw;
-        g_pitch = req.pitch;
-        logf("view yaw %g pitch %g", g_yaw, g_pitch);
+        vr::set_sim_view(req.yaw, req.pitch);
+        logf("view yaw %g pitch %g", req.yaw, req.pitch);
     }
-    if (req.stereo >= 0) {
-        g_sep = req.stereo;
-        logf("stereo separation %g", g_sep);
+    if (req.stereo >= 0) {  // stereo IPD_M: simulated headset with that eye separation; 0 = off
+        if (req.stereo > 0) vr::set_ipd(req.stereo);
+        vr::set_mode(req.stereo > 0 ? vr::Mode::Sim : vr::Mode::Off);
     }
     if (req.capture) {
         g_ids.clear();
@@ -731,11 +731,12 @@ static void end_frame(IDXGISwapChain* sc) {
     }
 
     write_status(sc);
-    limit_background_rate(sc);
+    if (vr::mode() != vr::Mode::OpenVR) limit_background_rate(sc);  // the compositor paces VR
 }
 
 static HRESULT STDMETHODCALLTYPE hk_Present(IDXGISwapChain* sc, UINT sync, UINT flags) {
     if (!(flags & DXGI_PRESENT_TEST)) end_frame(sc);
+    if (vr::mode() == vr::Mode::OpenVR) sync = 0;  // WaitGetPoses paces frames; no monitor vsync on top
     return o_Present(sc, sync, flags);
 }
 
@@ -821,12 +822,15 @@ static void hook_device(ID3D11Device* dev) {
     hook(dev, vt::dev_CreateDeferredContext, &hk_CreateDeferredContext, &o_CreateDeferredContext);
     hook(dev, vt::dev_GetImmediateContext, &hk_GetImmediateContext, &o_GetImmediateContext);
 
-    D3D11_BUFFER_DESC eye{64, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
-    const float zero[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0};
-    D3D11_SUBRESOURCE_DATA init{zero, 0, 0};
+    static_assert(sizeof(vr::EyeConsts) % 16 == 0, "constant buffer size");
+    D3D11_BUFFER_DESC eye{sizeof(vr::EyeConsts), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+    vr::EyeConsts initial{};
+    initial.head[0] = initial.head[5] = initial.head[10] = 1;  // identity, game projection
+    D3D11_SUBRESOURCE_DATA init{&initial, 0, 0};
     dev->CreateBuffer(&eye, &init, &g_eye_cb[0]);
     dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+    vr::init(dev, g_ctx);
 
     g_wrapped = wrap_context(g_ctx);
     wrap(vt::ctx_DrawIndexed, &w_DrawIndexed);

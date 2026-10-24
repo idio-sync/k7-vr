@@ -1,0 +1,1 @@
+OpenVR SDK v2.15.6 (ValveSoftware/openvr tag v2.15.6): headers/openvr.h, lib/win32, bin/win32 (Valve-signed).

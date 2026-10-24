@@ -13,6 +13,7 @@ if ($Game -like '*steamapps*') { throw "refusing to install into the Steam copy:
 
 Copy-Item (Join-Path $out 'XINPUT1_3.dll') $Game -Force
 if (Test-Path (Join-Path $out 'XINPUT1_3.pdb')) { Copy-Item (Join-Path $out 'XINPUT1_3.pdb') $Game -Force }
+Copy-Item (Join-Path $out 'openvr_api.dll') $Game -Force   # loaded only with [vr] mode=openvr
 
 $k7 = Join-Path $Game 'k7vr'
 $profileDir = Join-Path $k7 'SavedGames\killer7'

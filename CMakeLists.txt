@@ -24,6 +24,8 @@ add_library(k7vr SHARED
     src/proxy/audio_mute.cpp
     src/proxy/memscan.cpp
     src/proxy/fov_inflate.cpp
+    src/vr/headmath.cpp
+    src/vr/vr.cpp
     src/proxy/png.cpp
     src/proxy/control.cpp
     src/proxy/xinput.cpp)
@@ -31,3 +33,16 @@ set_target_properties(k7vr PROPERTIES OUTPUT_NAME XINPUT1_3)
 target_compile_definitions(k7vr PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 target_compile_options(k7vr PRIVATE /W4 /wd4100 /utf-8)
 target_link_libraries(k7vr PRIVATE d3d11 dxgi ole32 windowscodecs uuid)
+# OpenVR (32-bit 2.15.6), delay-loaded: openvr_api.dll is only loaded when [vr] mode=openvr.
+target_include_directories(k7vr PRIVATE third_party/openvr/headers)
+target_link_libraries(k7vr PRIVATE ${CMAKE_SOURCE_DIR}/third_party/openvr/lib/win32/openvr_api.lib delayimp)
+target_link_options(k7vr PRIVATE /DELAYLOAD:openvr_api.dll)
+add_custom_command(TARGET k7vr POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/third_party/openvr/bin/win32/openvr_api.dll $<TARGET_FILE_DIR:k7vr>)
+
+# Unit tests for the VR math (no game needed): ctest --test-dir out
+enable_testing()
+add_executable(k7vr_tests tests/test_headmath.cpp src/vr/headmath.cpp)
+target_compile_options(k7vr_tests PRIVATE /W4 /utf-8)
+add_test(NAME headmath COMMAND k7vr_tests)

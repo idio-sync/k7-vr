@@ -46,7 +46,7 @@ void scan_projection();  // hooks_d3d.cpp
 
 // FOV inflation (fov_inflate.cpp): the game culls with a wider FOV; shaders restore framing.
 void set_fov_inflate(float degrees);  // 0 = off
-float fov_inflate_scale();
+float fov_inflate_intended();         // the game's intended FOV this frame, 0 when not inflating
 
 // DXBC checksum (first 8 bytes of the container's MD5), used to name shaders.
 uint64_t dxbc_hash(const void* bytecode, size_t size);
