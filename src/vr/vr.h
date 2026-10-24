@@ -7,6 +7,10 @@
 //   ipd_m = 0.064               simulated eye separation (OpenVR uses the headset's)
 //   sim_fov = 100               simulated vertical FOV, degrees
 //   fov_inflate = 150           FOV the game culls with while stereo is on (0 = off)
+//   eye_res = auto              size of the game's 4:3 render targets while stereo is on:
+//                               auto (OpenVR: the headset's recommended size x eye_scale;
+//                               sim: unchanged), WxH, or game (unchanged)
+//   eye_scale = 1.0             multiplier on the recommended size for eye_res=auto
 #include <d3d11.h>
 
 namespace k7::vr {
@@ -29,10 +33,20 @@ bool stereo();  // drawing two eyes (Sim or OpenVR)
 // game_xy_ratio = the game projection's y scale / x scale (its aspect), for sim and flat modes.
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]);
 
+// The game camera's own view: identity head and the game's intended projection (undoing FOV
+// inflation). Used for the game-view pass that feeds the game's CPU readbacks.
+void game_view(float game_xy_ratio, EyeConsts* out);
+
 // Called once per frame after the game drew it. 3D frames: both eye images plus the HUD
 // (transparent, on a world-locked panel). 2D frames (menus, FMVs, loading): eyes null (black)
 // and `screen` is the game's mono image, shown on a larger opaque virtual screen.
 void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud, ID3D11Texture2D* screen);
+
+// The size the game's 4:3 render targets should be created at, or false to leave them alone.
+bool eye_resolution(unsigned* width, unsigned* height);
+
+// Aspect (width/height) of the picture inside HUD and screen textures, for the panels.
+void set_content_aspect(float aspect);
 
 void recenter();
 void set_mode(Mode m);  // Off <-> Sim from the command file; OpenVR only from the ini

@@ -2,7 +2,8 @@
 # ever ends the process this script started.
 param(
     [string]$Game = 'C:\Users\Virtual\killer7-vr-game',
-    [switch]$Stop
+    [switch]$Stop,
+    [switch]$Normal   # start with a normal window (headset playtests) instead of minimized
 )
 $ErrorActionPreference = 'Stop'
 $pidFile = Join-Path $Game 'k7vr\pid.txt'
@@ -31,6 +32,7 @@ Get-ChildItem (Join-Path $Game 'k7vr') -File | Where-Object Name -match '^((shot
 # A pipeline cache would skip D3DCompile, and with it the probe's shader patches.
 Remove-Item (Join-Path $Game 'Shaders\pipeline.cache') -ErrorAction SilentlyContinue
 # The probe keeps the window minimized (k7vr.ini minimized=1); start it that way too.
-$p = Start-Process (Join-Path $Game 'Killer7Win.exe') -WorkingDirectory $Game -WindowStyle Minimized -PassThru
+$style = if ($Normal) { 'Normal' } else { 'Minimized' }
+$p = Start-Process (Join-Path $Game 'Killer7Win.exe') -WorkingDirectory $Game -WindowStyle $style -PassThru
 Set-Content $pidFile $p.Id
 Write-Output "started PID $($p.Id)"

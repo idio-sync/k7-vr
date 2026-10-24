@@ -18,6 +18,7 @@
 //   rstick rx ry ms         right stick, -1..1
 //   trig l r ms             triggers, 0..1
 //   wait ms                 idle
+//   flush                   immediately drop all queued steps (and release held keys/buttons)
 //   scanf LO HI / rescanf LO HI / peekf ADDR / pokef ADDR V / pokehits V   memory probing (memscan.cpp)
 //   activate                tell the game its window is active (it ignores input otherwise)
 //   mouse x y               where the game sees the cursor, in window client pixels (default: off-window)
@@ -130,6 +131,16 @@ static void run_line(const std::string& line) {
     ss >> cmd;
     if (cmd.empty() || cmd[0] == '#') return;
     std::lock_guard lock(g_mx);
+    if (cmd == "flush") {  // immediately: drop queued steps and release anything held
+        if (g_running && g_cur.vk) post_key(g_cur.vk, false);
+        if (g_running && g_cur.mouse)
+            post_mouse(g_cur.mouse == 1 ? RI_MOUSE_LEFT_BUTTON_UP : RI_MOUSE_RIGHT_BUTTON_UP, 0, 0);
+        logf("cmd: flush (%zu queued steps dropped)", g_steps.size());
+        g_steps.clear();
+        g_running = false;
+        g_cur = Step{};
+        return;
+    }
     if (cmd == "capture") {
         g_steps.push_back(Step{.capture = true});
     } else if (cmd == "shot") {

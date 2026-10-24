@@ -198,6 +198,7 @@ constexpr UINT kStereoSlot = 12;
 constexpr UINT kMaxTargets = 4;
 constexpr UINT kMaxTextures = 8;
 static ID3D11Buffer* g_eye_cb[2];  // left, right
+static ID3D11Buffer* g_gv_cb;      // game-view pass (vr::game_view)
 static vr::EyeConsts g_eyes[2];    // this frame's eyes
 static bool g_pair;                // save both eyes at the end of this frame
 static unsigned g_pair_index;
@@ -221,6 +222,11 @@ static void set_eye_offsets() {
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
     vr::begin_frame(ratio, g_eyes);
     for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &g_eyes[eye], 0, 0);
+    if (g_gv_cb) {
+        vr::EyeConsts gv;
+        vr::game_view(ratio, &gv);
+        g_ctx->UpdateSubresource(g_gv_cb, 0, nullptr, &gv, 0, 0);
+    }
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 }
 
@@ -380,19 +386,6 @@ static bool pixel_shader_textured() {
     return slots != 0;
 }
 
-// Draws that write depth are scene work (e.g. the full-screen quads that clear the scene
-// target after a reflection pre-pass), never HUD.
-static bool writes_depth() {
-    ID3D11DepthStencilState* ds = nullptr;
-    UINT ref = 0;
-    g_ctx->OMGetDepthStencilState(&ds, &ref);
-    if (!ds) return true;  // default state: depth test and writes on
-    D3D11_DEPTH_STENCIL_DESC d;
-    ds->GetDesc(&d);
-    ds->Release();
-    return d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
-}
-
 static bool is_card_shader() {
     if (g_card_ps.empty()) return false;
     ID3D11PixelShader* ps = nullptr;
@@ -498,10 +491,170 @@ static void note_final_source() {
     g_final[1] = twin_tex(res, false);
 }
 
+// ---- Eye-resolution render targets ----
+// In VR the game's 4:3 render and depth targets are created at the headset's eye resolution
+// (vr::eye_resolution); draws into them get the game's viewports and scissors scaled to match.
+
+static std::unordered_map<ID3D11Resource*, std::pair<float, float>> g_resized;  // texture -> (sx, sy)
+static UINT g_orig_w, g_orig_h;  // the size the game asked for (its 4:3 targets)
+
+using CreateTexture2D_t = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*,
+                                                      const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
+static CreateTexture2D_t o_CreateTexture2D;
+
+static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11_TEXTURE2D_DESC* desc,
+                                                    const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
+    unsigned w = 0, h = 0;
+    // Not textures the CPU reads (the game's frame copies for its readbacks keep their size).
+    if (d == g_dev && desc && !init && (desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) &&
+        !desc->CPUAccessFlags && desc->Width * 3 == desc->Height * 4 && desc->Height >= 480 &&
+        vr::eye_resolution(&w, &h)) {
+        D3D11_TEXTURE2D_DESC nd = *desc;
+        nd.Width = w;
+        nd.Height = h;
+        HRESULT hr = o_CreateTexture2D(d, &nd, init, out);
+        if (SUCCEEDED(hr) && out && *out) {
+            g_resized[*out] = {float(w) / float(desc->Width), float(h) / float(desc->Height)};
+            g_orig_w = desc->Width;
+            g_orig_h = desc->Height;
+            vr::set_content_aspect(float(desc->Width) / float(desc->Height));
+            logf("eye targets: %ux%u f%d created at %ux%u", desc->Width, desc->Height, desc->Format, w, h);
+        }
+        return hr;
+    }
+    // (The game makes its readback staging textures from the resized targets' descriptions and
+    // sizes its CPU reads from them, so those stay resized; the game-view targets match them.)
+    return o_CreateTexture2D(d, desc, init, out);
+}
+
+// Scales the bound viewports and scissors to a resized render target for one draw.
+struct ViewportScale {
+    bool active = false;
+    D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];  // the game's
+    D3D11_RECT sr[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    UINT nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    UINT nsr = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+
+    // Back to the game's own viewports (game-view pass) / to the scaled ones again.
+    void unscale() const {
+        if (!active) return;
+        if (nvp) g_ctx->RSSetViewports(nvp, vp);
+        if (nsr) g_ctx->RSSetScissorRects(nsr, sr);
+    }
+    void rescale() const {
+        if (!active) return;
+        if (nvp) g_ctx->RSSetViewports(nvp, svp);
+        if (nsr) g_ctx->RSSetScissorRects(nsr, ssr);
+    }
+    D3D11_VIEWPORT svp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];  // scaled
+    D3D11_RECT ssr[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+
+    explicit ViewportScale(ID3D11Resource* rt) {
+        if (g_resized.empty() || !rt) return;
+        auto it = g_resized.find(rt);
+        if (it == g_resized.end()) return;
+        const float sx = it->second.first, sy = it->second.second;
+        g_ctx->RSGetViewports(&nvp, vp);
+        g_ctx->RSGetScissorRects(&nsr, sr);
+        for (UINT i = 0; i < nvp; ++i)
+            svp[i] = {vp[i].TopLeftX * sx, vp[i].TopLeftY * sy, vp[i].Width * sx, vp[i].Height * sy, vp[i].MinDepth,
+                      vp[i].MaxDepth};
+        for (UINT i = 0; i < nsr; ++i)
+            ssr[i] = {LONG(sr[i].left * sx), LONG(sr[i].top * sy), LONG(sr[i].right * sx), LONG(sr[i].bottom * sy)};
+        if (nvp) g_ctx->RSSetViewports(nvp, svp);
+        if (nsr) g_ctx->RSSetScissorRects(nsr, ssr);
+        active = true;
+    }
+    ~ViewportScale() {
+        if (!active) return;
+        if (nvp) g_ctx->RSSetViewports(nvp, vp);
+        if (nsr) g_ctx->RSSetScissorRects(nsr, sr);
+    }
+};
+
+// ---- Game view ----
+// The game reads its own frame back on the CPU (the port's emulation of GX "EFB peeks": hit
+// tests among others) from copies it makes of the scene colour and depth targets. In stereo
+// those targets hold eye images (head-tracked, headset projection, resized), so every scene draw
+// is also drawn from the game camera with its own projection and viewports at the original size
+// into game-view targets, and the game's copies out of the scene targets read from those.
+
+static std::unordered_map<ID3D11Resource*, ID3D11Texture2D*> g_gv_tex;  // scene texture -> game view
+static std::unordered_map<ID3D11View*, ID3D11View*> g_gv_views;
+
+static ID3D11Texture2D* gv_tex(ID3D11Resource* res, bool create) {
+    auto it = g_gv_tex.find(res);
+    if (it != g_gv_tex.end()) return it->second;
+    if (!create || !res) return nullptr;
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return nullptr;
+    D3D11_TEXTURE2D_DESC d;  // same size as the (possibly resized) scene target, like the game's copies
+    static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+    d.MiscFlags &= ~UINT(D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
+                         D3D11_RESOURCE_MISC_GDI_COMPATIBLE);
+    ID3D11Texture2D* t = nullptr;
+    if (FAILED(o_CreateTexture2D(g_dev, &d, nullptr, &t))) return nullptr;
+    logf("game view: %ux%u f%d", d.Width, d.Height, d.Format);
+    g_gv_tex[res] = t;
+    return t;
+}
+
+template <typename V>
+static V* gv_view(V* view, bool create) {
+    auto it = g_gv_views.find(view);
+    if (it != g_gv_views.end()) return static_cast<V*>(it->second);
+    if (!create) return nullptr;
+    ID3D11Resource* res = nullptr;
+    view->GetResource(&res);
+    res->Release();
+    ID3D11Texture2D* t = gv_tex(res, true);
+    if (!t) return nullptr;
+    V* out = nullptr;
+    HRESULT hr;
+    if constexpr (std::is_same_v<V, ID3D11RenderTargetView>) {
+        D3D11_RENDER_TARGET_VIEW_DESC vd;
+        view->GetDesc(&vd);
+        hr = g_dev->CreateRenderTargetView(t, &vd, &out);
+    } else {
+        D3D11_DEPTH_STENCIL_VIEW_DESC vd;
+        view->GetDesc(&vd);
+        hr = g_dev->CreateDepthStencilView(t, &vd, &out);
+    }
+    if (FAILED(hr)) return nullptr;
+    g_gv_views[view] = out;
+    return out;
+}
+
+// One scene draw into the game-view targets, from the game camera at the game's viewports.
+template <typename DrawFn>
+static void draw_game_view(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D11DepthStencilView* dsv,
+                           const ViewportScale& scale) {
+    if (!g_gv_cb) return;
+    ID3D11RenderTargetView* grtv[kMaxTargets] = {};
+    for (UINT i = 0; i < kMaxTargets; ++i)
+        if (rtv[i] && !(grtv[i] = gv_view(rtv[i], true))) return;
+    ID3D11DepthStencilView* gdsv = dsv ? gv_view(dsv, true) : nullptr;
+    if (dsv && !gdsv) return;
+    (void)scale;  // same size as the eye targets: the scaled viewports apply as they are
+    g_ctx->OMSetRenderTargets(kMaxTargets, grtv, gdsv);
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_gv_cb);
+    draw();
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+    g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+}
+
+static bool points_or_lines() {
+    D3D11_PRIMITIVE_TOPOLOGY t;
+    g_ctx->IAGetPrimitiveTopology(&t);
+    return t == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST || t == D3D11_PRIMITIVE_TOPOLOGY_LINELIST ||
+           t == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+}
+
 // Runs `draw` for the left eye, then for the right eye on twins (see the section comment).
 template <typename DrawFn>
 static void draw_stereo(DrawFn draw) {
-    if (!vr::stereo()) {
+    if (!vr::stereo() && g_resized.empty()) {
         draw();
         return;
     }
@@ -517,6 +670,12 @@ static void draw_stereo(DrawFn draw) {
     if (rtv[0]) {
         rtv[0]->GetResource(&rt0);
         rt0->Release();
+    }
+    ViewportScale scale(rt0);
+    if (!vr::stereo()) {  // stereo switched off at runtime with resized targets: just scale
+        draw();
+        release_targets();
+        return;
     }
     if (!rtv[0] || rt0 == g_backbuffer) {  // the blit to the window: once
         if (rt0) note_final_source();
@@ -539,20 +698,26 @@ static void draw_stereo(DrawFn draw) {
     const bool eye_image = scene && kind == 2 && samples_eye_image();
     if (eye_image && !g_frame_3d) {
         // A screen-fixed backdrop made from last frame's image (drawn before the 3D scene, which
-        // normally covers it). With head tracking it shows wherever geometry doesn't: skip it.
+        // normally covers it). With head tracking it shows wherever geometry doesn't: skip it in
+        // the eyes (the game's own view keeps it).
+        draw_game_view(draw, rtv, dsv, scale);
         release_targets();
         return;
     }
-    if (scene && kind == 2 && g_frame_3d && !eye_image && !writes_depth() && pixel_shader_textured() &&
-        hud_target_like(rtv[0])) {  // HUD: once, into the overlay
+    // HUD: textured 2D artwork and point/line overlays (sparkles, reticle lines) after the 3D
+    // scene. Untextured triangle quads (dims, fades, clears) and screen-image effects stay per eye.
+    if (scene && kind == 2 && g_frame_3d && !eye_image && (pixel_shader_textured() || points_or_lines()) &&
+        hud_target_like(rtv[0])) {  // once, into the overlay
         g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
         draw_hud(draw);
         g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+        draw_game_view(draw, rtv, dsv, scale);
         release_targets();
         return;
     }
     const bool card = kind == 1 && is_card_shader();
-    if (card && g_card_skip) {  // card_mode=skip: view-dependent cards are left out in stereo
+    if (card && g_card_skip) {  // card_mode=skip: view-dependent cards are left out of the eyes
+        draw_game_view(draw, rtv, dsv, scale);
         release_targets();
         return;
     }
@@ -593,6 +758,7 @@ static void draw_stereo(DrawFn draw) {
         for (auto s : srv)
             if (s) s->Release();
     }
+    if (scene) draw_game_view(draw, rtv, dsv, scale);
     release_targets();
 }
 
@@ -600,11 +766,13 @@ static void draw_stereo(DrawFn draw) {
 static void mirror_clear_rtv(ID3D11RenderTargetView* rtv, const FLOAT color[4]) {
     if (!vr::stereo() || !rtv) return;
     if (auto t = twin_view(rtv, false)) g_ctx->ClearRenderTargetView(t, color);
+    if (auto g = gv_view(rtv, false)) g_ctx->ClearRenderTargetView(g, color);
 }
 
 static void mirror_clear_dsv(ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
     if (!vr::stereo() || !dsv) return;
     if (auto t = twin_view(dsv, false)) g_ctx->ClearDepthStencilView(t, flags, depth, stencil);
+    if (auto g = gv_view(dsv, false)) g_ctx->ClearDepthStencilView(g, flags, depth, stencil);
 }
 
 static void mirror_copy(ID3D11Resource* dst, UINT dsub, UINT x, UINT y, UINT z, ID3D11Resource* src, UINT ssub,
@@ -718,6 +886,15 @@ static HRESULT STDMETHODCALLTYPE w_Map(ID3D11DeviceContext* c, ID3D11Resource* r
                                        UINT flags, D3D11_MAPPED_SUBRESOURCE* out) {
     HRESULT hr = real_of(c)->Map(res, sub, type, flags, out);
     if (SUCCEEDED(hr) && out && type != D3D11_MAP_READ && constant_buffer_size(res)) g_cb_mapped[res] = out->pData;
+    if (type == D3D11_MAP_READ || type == D3D11_MAP_READ_WRITE) {  // the game reading GPU data back
+        static int logged;
+        if (logged++ < 40) {
+            std::string s;
+            describe_resource(s, "res", res);
+            logf("readback: Map %s by exe+%x", s.c_str(),
+                 unsigned(uintptr_t(_ReturnAddress()) - uintptr_t(GetModuleHandleW(nullptr))));
+        }
+    }
     return hr;
 }
 
@@ -794,6 +971,21 @@ static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID
         if (box) appendf(g_cap.text, " box=%u,%u-%u,%u", box->left, box->top, box->right, box->bottom);
         appendf(g_cap.text, " at=%u,%u\n", x, y);
     }
+    if (box) {  // regional copies (readback candidates): log a few with their source
+        static int logged;
+        if (logged++ < 40) {
+            std::string s;
+            describe_resource(s, "src", src);
+            describe_resource(s, "dst", dst);
+            logf("readback: CopySubresourceRegion%s box=%u,%u-%u,%u at=%u,%u by exe+%x", s.c_str(), box->left,
+                 box->top, box->right, box->bottom, x, y,
+                 unsigned(uintptr_t(_ReturnAddress()) - uintptr_t(GetModuleHandleW(nullptr))));
+        }
+    }
+    if (ID3D11Texture2D* g = vr::stereo() && !g_resized.count(dst) ? gv_tex(src, false) : nullptr) {
+        real_of(c)->CopySubresourceRegion(dst, dsub, x, y, z, g, ssub, box);  // the game's view, for readbacks
+        return;
+    }
     real_of(c)->CopySubresourceRegion(dst, dsub, x, y, z, src, ssub, box);
     mirror_copy(dst, dsub, x, y, z, src, ssub, box, false);
 }
@@ -804,6 +996,10 @@ static void STDMETHODCALLTYPE w_CopyResource(ID3D11DeviceContext* c, ID3D11Resou
         describe_resource(g_cap.text, "src", src);
         describe_resource(g_cap.text, "dst", dst);
         g_cap.text += '\n';
+    }
+    if (ID3D11Texture2D* g = vr::stereo() && !g_resized.count(dst) ? gv_tex(src, false) : nullptr) {
+        real_of(c)->CopyResource(dst, g);  // the game's view, for readbacks
+        return;
     }
     real_of(c)->CopyResource(dst, src);
     mirror_copy(dst, 0, 0, 0, 0, src, 0, nullptr, true);
@@ -1240,6 +1436,7 @@ static void hook_device(ID3D11Device* dev) {
     hook(dev, vt::dev_CreateVertexShader, &hk_CreateVS, &o_CreateVS);
     hook(dev, vt::dev_CreateGeometryShader, &hk_CreateGS, &o_CreateGS);
     hook(dev, vt::dev_CreatePixelShader, &hk_CreatePS, &o_CreatePS);
+    hook(dev, vt::dev_CreateTexture2D, &hk_CreateTexture2D, &o_CreateTexture2D);
     hook(dev, vt::dev_CreateDeferredContext, &hk_CreateDeferredContext, &o_CreateDeferredContext);
     hook(dev, vt::dev_GetImmediateContext, &hk_GetImmediateContext, &o_GetImmediateContext);
 
@@ -1250,6 +1447,7 @@ static void hook_device(ID3D11Device* dev) {
     D3D11_SUBRESOURCE_DATA init{&initial, 0, 0};
     dev->CreateBuffer(&eye, &init, &g_eye_cb[0]);
     dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);
+    dev->CreateBuffer(&eye, &init, &g_gv_cb);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
     vr::init(dev, g_ctx);
     load_card_list();

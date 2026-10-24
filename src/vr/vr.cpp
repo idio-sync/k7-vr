@@ -23,6 +23,8 @@ static ID3D11Device* g_dev;
 static ID3D11DeviceContext* g_ctx;
 static ::vr::IVRSystem* g_system;
 static ID3D11Texture2D* g_eye_tex[2];
+static unsigned g_eye_w, g_eye_h;   // resize target for the game's 4:3 render targets (0 = leave)
+static float g_content_aspect = 4.f / 3.f;
 
 static float ini_float(const wchar_t* key, float fallback) {
     wchar_t buf[64];
@@ -77,9 +79,32 @@ void init(ID3D11Device* device, ID3D11DeviceContext* context) {
     } else if (_wcsicmp(m, L"sim") == 0) {
         g_mode = Mode::Sim;
     }
-    logf("vr: mode %ls -> %d, unit %.3f m, ipd %.3f m, inflate %g", m, int(g_mode), g_unit, g_ipd, g_inflate);
+    // Eye render target size.
+    wchar_t res[32];
+    GetPrivateProfileStringW(L"vr", L"eye_res", L"auto", res, 32, path_in(L"k7vr.ini").c_str());
+    unsigned w = 0, h = 0;
+    if (swscanf_s(res, L"%ux%u", &w, &h) == 2 && w && h) {
+        g_eye_w = w, g_eye_h = h;
+    } else if (_wcsicmp(res, L"auto") == 0 && g_mode == Mode::OpenVR) {
+        uint32_t rw = 0, rh = 0;
+        g_system->GetRecommendedRenderTargetSize(&rw, &rh);
+        const float scale = ini_float(L"eye_scale", 1.0f);
+        g_eye_w = unsigned(rw * scale + 0.5f) & ~1u;
+        g_eye_h = unsigned(rh * scale + 0.5f) & ~1u;
+    }
+    logf("vr: mode %ls -> %d, unit %.3f m, ipd %.3f m, inflate %g, eye targets %ux%u", m, int(g_mode), g_unit, g_ipd,
+         g_inflate, g_eye_w, g_eye_h);
     apply_inflation();
 }
+
+bool eye_resolution(unsigned* width, unsigned* height) {
+    if (!stereo() || !g_eye_w || !g_eye_h) return false;
+    *width = g_eye_w;
+    *height = g_eye_h;
+    return true;
+}
+
+void set_content_aspect(float aspect) { g_content_aspect = aspect; }
 
 Mode mode() { return g_mode; }
 bool stereo() { return g_mode != Mode::Off; }
@@ -102,19 +127,25 @@ static void symmetric_rows(float tan_y, float game_xy_ratio, EyeConsts& e) {
     projection_rows(-tan_x, tan_x, -tan_y, tan_y, e.px, e.py);
 }
 
+void game_view(float game_xy_ratio, EyeConsts* out) {
+    if (game_xy_ratio <= 0) game_xy_ratio = 1.18f;
+    memset(out, 0, sizeof(EyeConsts));
+    eye_space_transform(identity(), g_unit, out->head);
+    // If the game culls with an inflated FOV, project with the one it meant.
+    const float intended = fov_inflate_intended();
+    if (intended > 0) {
+        symmetric_rows(tanf(intended * 3.14159265f / 360), game_xy_ratio, *out);
+        out->flags[0] = 1;
+    }
+}
+
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
     if (game_xy_ratio <= 0) game_xy_ratio = 1.18f;
     const float d2r = 3.14159265f / 180;
     for (int eye = 0; eye < 2; ++eye) memset(&eyes[eye], 0, sizeof(EyeConsts));
 
     if (g_mode == Mode::Off) {
-        // Flat: identity head; if the game culls with an inflated FOV, project with the intended one.
-        eye_space_transform(identity(), g_unit, eyes[0].head);
-        const float intended = fov_inflate_intended();
-        if (intended > 0) {
-            symmetric_rows(tanf(intended * d2r / 2), game_xy_ratio, eyes[0]);
-            eyes[0].flags[0] = 1;
-        }
+        game_view(game_xy_ratio, &eyes[0]);
         eyes[1] = eyes[0];
         return;
     }
@@ -230,6 +261,9 @@ static void update_panel(Panel& p, ID3D11Texture2D* src) {
     }
     if (!ensure_like(p.copy, src)) return;
     g_ctx->CopySubresourceRegion(p.copy, 0, 0, 0, 0, src, 0, nullptr);
+    D3D11_TEXTURE2D_DESC d;
+    src->GetDesc(&d);  // the picture inside is 4:3 even when the texture was resized for the eyes
+    overlay->SetOverlayTexelAspect(p.handle, g_content_aspect * float(d.Height) / float(d.Width));
     ::vr::Texture_t tex{p.copy, ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
     overlay->SetOverlayTexture(p.handle, &tex);
     const ::vr::HmdMatrix34_t m = to_openvr(compose(g_reference, translation(0, -p.drop_m, -p.distance_m)));
