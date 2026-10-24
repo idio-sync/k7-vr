@@ -30,7 +30,7 @@ Findings: [docs/findings.md](docs/findings.md). Playtest scripts: [docs/playtest
 - Settings are listed at the top of `src\vr\vr.h` and in [docs/playtests/m4.md](docs/playtests/m4.md).
 
 Controllers (index-style): right trigger fire, right grip hold = aim mode (then point the right
-controller), A accept, B skip/decline, right stick aim/menus, right stick click reload; left
+controller; on the silhouette screen that starts a target, just point at it), A accept, B skip/decline, right stick aim/menus, right stick click reload; left
 trigger walk, left grip scan, X special, Y map, left stick up walk / down turn / left-right
 choose, left stick click menu.
 

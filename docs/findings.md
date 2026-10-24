@@ -158,6 +158,21 @@ the hand, the forearm is clipped behind the grip (`gun_clip_z`, an `SV_ClipDista
 arm/gun draws only), and the game's reticle (centred, full-height lines) is masked out of the
 HUD (`aim_hud_mask`).
 
+**Laser-pointer screens (the silhouette shot that starts a target).** The dot is a heap object
+(found with `scanpoint`, which scans memory for the dot draw's vertex): x, y at +0/+4 in game
+camera eye space, drawn at (x, y, `+0x20` = 27.3) moved 50 units forward, so it lies on a plane
+22.7 units ahead; velocities (idle sway) at `+0x24/+0x28`; screen x/y (640×480) at
+`+0x0c/+0x10`, which the hit test uses against a CPU readback of the frame. Updated by
+`173e40` (owner `esi`, dot at `esi+0x31a8`; pointer input from `[[0x86e328]+0x260]+0x1c4`,
+an absolute 640×480 position, moves the dot towards it), clamped at `237700` (±10.8, ±8.7,
+ecx = the dot). Injected arrows/mouse/fake cursor did not move it in the harness. The mod hooks
+`237700` to set x, y from the right controller's ray ∩ that plane and zero the sway, draws its
+laser from the controller to the dot, hides the game's 2D line, and suspends FOV inflation
+while the screen is up: the game projects the dot with its camera's FOV and reads the frame back,
+so both must use the FOV it really renders (with inflation the readback silhouette was tiny and
+the hit missed). The game-view pass now renders with the game's own projection for the same
+reason. Verified in sim: a miss does nothing, an off-centre hit (the head) starts the target.
+
 ## Driving the game unattended (for later testing)
 
 - Run minimized (user's request), muted via the process audio session, 60 fps cap while

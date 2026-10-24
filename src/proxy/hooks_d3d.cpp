@@ -117,7 +117,36 @@ static void append_matrix(std::string& s, const char* label, const float* m, int
 
 constexpr UINT kCaptureTextures = 4;
 
-static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, UINT instances) {
+// The vertices of a non-indexed draw from vertex buffer 0 (read back now: a stall, for probing).
+static bool read_vertices(ID3D11DeviceContext* c, UINT first_vertex, UINT count, std::vector<float>& out, UINT* stride_out) {
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    c->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    bool ok = false;
+    if (vb && stride) {
+        const UINT bytes = count * stride;
+        D3D11_BUFFER_DESC bd{bytes, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+        ID3D11Buffer* staging = nullptr;
+        if (SUCCEEDED(g_dev->CreateBuffer(&bd, nullptr, &staging))) {
+            const UINT begin = offset + first_vertex * stride;
+            const D3D11_BOX box{begin, 0, 0, begin + bytes, 1, 1};
+            g_ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, vb, 0, &box);
+            D3D11_MAPPED_SUBRESOURCE m;
+            if (SUCCEEDED(g_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
+                const float* f = static_cast<const float*>(m.pData);
+                out.assign(f, f + bytes / 4);
+                *stride_out = stride;
+                g_ctx->Unmap(staging, 0);
+                ok = true;
+            }
+            staging->Release();
+        }
+    }
+    if (vb) vb->Release();
+    return ok;
+}
+
+static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, UINT instances, INT first_vertex) {
     std::string& s = g_cap.text;
     appendf(s, "%4u %s n=%u", g_draws, kind, count);
     if (instances != 1) appendf(s, " inst=%u", instances);
@@ -185,7 +214,35 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
         describe_view(s, label, srv[i]);
         srv[i]->Release();
     }
+    // Tiny non-indexed draws (points, lines, sprites): their vertices, as floats.
+    std::vector<float> f;
+    UINT stride = 0;
+    if (first_vertex >= 0 && count <= 6 && read_vertices(c, UINT(first_vertex), count, f, &stride)) {
+        appendf(s, " verts(stride %u)=", stride);
+        for (UINT v = 0; v < count; ++v) {
+            s += v ? "|" : "";
+            for (UINT i = 0; i < stride / 4 && i < 8; ++i) appendf(s, i ? " %.6g" : "%.6g", f[v * (stride / 4) + i]);
+        }
+    }
     s += '\n';
+}
+
+// `scanpoint`: at the next single-vertex point draw (e.g. the aiming tutorial's laser dot),
+// search memory for its x,y pair while the frame is held (memscan.cpp).
+static bool g_scan_point;
+void request_scan_point() { g_scan_point = true; }
+
+static void maybe_scan_point(UINT count, UINT first_vertex) {
+    if (!g_scan_point || count != 1) return;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    if (topo != D3D11_PRIMITIVE_TOPOLOGY_POINTLIST) return;
+    g_scan_point = false;
+    std::vector<float> f;
+    UINT stride = 0;
+    if (!read_vertices(g_ctx, first_vertex, 1, f, &stride) || f.size() < 3) return;
+    logf("scanpoint: vertex %g %g %g", f[0], f[1], f[2]);
+    mem_scanpair(f[0], f[1], 1e-6f, 8);
 }
 
 // ---- Frame image: the game's own frame, as sampled by its final blit to the window ----
@@ -253,6 +310,8 @@ static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden 
 static bool g_laser_depth = true;                     // walls hide the laser (`gun laserdepth 0`: debugging)
 static bool g_laser_ready;                            // g_laser_pose is this frame's
 static vr::Pose g_laser_pose;                         // the hand in the game camera's eye space (game units)
+static float g_laser_from, g_laser_to;                // this frame's beam, metres along the hand's ray
+static bool g_pointer_mode;                           // a laser-pointer screen follows the hand this frame
 
 static void init_draw_buffers() {
     wchar_t buf[64];
@@ -272,6 +331,7 @@ static void init_draw_buffers() {
     GetPrivateProfileStringW(L"vr", L"aim_pitch_limit", L"80", buf, 64, ini.c_str());
     const float limit = float(_wtof(buf));
     if (limit > 36 && limit < 90) aim_widen_clamp(limit * 3.14159265f / 180);
+    pointer_install();
     // [0]: no transform. [1]: the arm and gun, rewritten each aim-mode frame (until the first,
     // shrunk in place around the grip).
     const float none[16] = {};
@@ -330,6 +390,7 @@ static void relock_aim() {
     const vr::Pose q = vr::compose(vr::inverse(cam), vr::scaled(hand, 1 / u));
     g_laser_pose = q;
     g_laser_ready = g_laser_length > 0;
+    g_laser_from = g_laser_muzzle, g_laser_to = g_laser_length;
     const float s = g_gun_scale;
     float m[16] = {};
     for (int i = 0; i < 3; ++i) {
@@ -437,7 +498,7 @@ static void draw_laser(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv)
     } c{};
     const float u = vr::unit();
     const vr::Pose& q = g_laser_pose;
-    const float d0 = g_laser_muzzle / u, d1 = g_laser_length / u;
+    const float d0 = g_laser_from / u, d1 = g_laser_to / u;
     for (int i = 0; i < 3; ++i) {
         c.a[i] = q.m[i][3] - d0 * q.m[i][2];
         c.b[i] = q.m[i][3] - d1 * q.m[i][2];
@@ -541,6 +602,24 @@ static void draw_laser(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv)
         if (p) p->Release();
 }
 
+// Laser-pointer screens (the silhouette shot that starts a target): the game's dot goes where
+// the hand's ray meets its plane in front of the game camera, and the laser runs from the
+// controller to it. Outside aim mode the player's frame is the game camera's eye space.
+static void steer_pointer(float plane) {
+    vr::Pose hand;
+    if (!vr::hand_pose(&hand)) return;
+    const float u = vr::unit();
+    const float o[3] = {hand.m[0][3] / u, hand.m[1][3] / u, hand.m[2][3] / u};
+    const float d[3] = {-hand.m[0][2], -hand.m[1][2], -hand.m[2][2]};
+    if (d[2] > -0.05f) return;  // not pointing towards the screen: the game's own controls
+    const float t = (-plane - o[2]) / d[2];
+    pointer_set(true, o[0] + t * d[0], o[1] + t * d[1]);
+    g_pointer_mode = true;
+    g_laser_pose = vr::scaled(hand, 1 / u);
+    g_laser_from = 0.02f, g_laser_to = t * u;
+    g_laser_ready = g_laser_length > 0;
+}
+
 // Before the game draws a frame: both eyes' transforms and projections (waits for headset
 // poses in OpenVR mode).
 static void set_eye_offsets() {
@@ -561,6 +640,13 @@ static void set_eye_offsets() {
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
     vr::begin_frame(ratio, g_eyes);
     if (aim) steer_aim();
+    float plane = 0;
+    const bool pointer = pointer_active(&plane) && vr::stereo() && !aim;
+    if (pointer != g_pointer_mode) logf("stereo: laser pointer %s", pointer ? "on" : "off");
+    vr::suspend_inflation(pointer);
+    g_pointer_mode = false;
+    pointer_set(false, 0, 0);
+    if (pointer) steer_pointer(plane);
     for (int eye = 0; eye < 2; ++eye) g_ctx->UpdateSubresource(g_eye_cb[eye], 0, nullptr, &g_eyes[eye], 0, 0);
     if (g_gv_cb) {
         vr::EyeConsts gv;
@@ -1078,9 +1164,14 @@ static void draw_stereo(DrawFn draw) {
         hud_target_like(rtv[0])) {  // once, into the overlay
         // The laser goes in after the whole scene (it doesn't write depth, so later draws would
         // cover it) and before the HUD.
-        if (g_aim_mode) draw_laser(rtv[0], dsv);
-        g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
-        draw_hud([&] { draw_hud_masked(draw); });
+        if (g_aim_mode || g_pointer_mode) draw_laser(rtv[0], dsv);
+        // Laser-pointer screens: the game's own 2D beam (a line to the dot) gives way to ours.
+        D3D11_PRIMITIVE_TOPOLOGY topo;
+        g_ctx->IAGetPrimitiveTopology(&topo);
+        if (!(g_pointer_mode && topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST)) {
+            g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
+            draw_hud([&] { draw_hud_masked(draw); });
+        }
         g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
         draw_game_view(draw, rtv, dsv, scale);
         release_targets();
@@ -1240,8 +1331,8 @@ static void grab_final_source() {
     res->Release();
 }
 
-static void before_draw(const char* kind, UINT count, UINT instances) {
-    if (g_cap.active) capture_draw(g_ctx, kind, count, instances);
+static void before_draw(const char* kind, UINT count, UINT instances, INT first_vertex = -1) {
+    if (g_cap.active) capture_draw(g_ctx, kind, count, instances, first_vertex);
     if (g_want_image) grab_final_source();
     ++g_draws;
 }
@@ -1293,7 +1384,8 @@ static void STDMETHODCALLTYPE w_DrawIndexed(ID3D11DeviceContext* c, UINT count, 
 }
 
 static void STDMETHODCALLTYPE w_Draw(ID3D11DeviceContext* c, UINT count, UINT start) {
-    before_draw("Draw", count, 1);
+    before_draw("Draw", count, 1, INT(start));
+    maybe_scan_point(count, start);
     draw_stereo([&] { real_of(c)->Draw(count, start); });
     after_draw();
 }
@@ -1717,6 +1809,10 @@ static void end_frame(IDXGISwapChain* sc) {
                 save_texture(g_scene_tex, path_in(name));
                 if (ID3D11Texture2D* t = twin_tex(g_scene_tex, false)) {
                     swprintf(name, 64, L"pair_%03u_scene_R.png", g_pair_index);
+                    save_texture(t, path_in(name));
+                }
+                if (ID3D11Texture2D* t = gv_tex(g_scene_tex, false)) {  // what the game's readbacks see
+                    swprintf(name, 64, L"pair_%03u_game.png", g_pair_index);
                     save_texture(t, path_in(name));
                 }
             }

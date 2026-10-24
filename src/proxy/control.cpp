@@ -279,6 +279,8 @@ static void run_line(const std::string& line) {
         float deg = 0;
         ss >> deg;
         g_steps.push_back(Step{.action = [=] { set_fov_inflate(deg); }});
+    } else if (cmd == "scanpoint") {
+        g_steps.push_back(Step{.action = [] { request_scan_point(); }});
     } else if (cmd == "scanproj") {
         g_steps.push_back(Step{.action = [] { scan_projection(); }});
     } else if (cmd == "scanpair") {

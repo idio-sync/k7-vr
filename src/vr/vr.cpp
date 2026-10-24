@@ -47,7 +47,14 @@ static Pose from_openvr(const ::vr::HmdMatrix34_t& m) {
     return p;
 }
 
-static void apply_inflation() { set_fov_inflate(stereo() ? g_inflate : 0); }
+static bool g_inflate_suspended;
+static void apply_inflation() { set_fov_inflate(stereo() && !g_inflate_suspended ? g_inflate : 0); }
+
+void suspend_inflation(bool suspend) {
+    if (suspend == g_inflate_suspended) return;
+    g_inflate_suspended = suspend;
+    apply_inflation();
+}
 
 static bool init_openvr() {
     ::vr::EVRInitError err = ::vr::VRInitError_None;
@@ -165,15 +172,11 @@ static void symmetric_rows(float tan_y, float game_xy_ratio, EyeConsts& e) {
 }
 
 void game_view(float game_xy_ratio, EyeConsts* out) {
-    if (game_xy_ratio <= 0) game_xy_ratio = 1.18f;
+    (void)game_xy_ratio;
     memset(out, 0, sizeof(EyeConsts));
     eye_space_transform(identity(), g_unit, out->head);
-    // If the game culls with an inflated FOV, project with the one it meant.
-    const float intended = fov_inflate_intended();
-    if (intended > 0) {
-        symmetric_rows(tanf(intended * 3.14159265f / 360), game_xy_ratio, *out);
-        out->flags[0] = 1;
-    }
+    // The game's own projection, inflated FOV included: what it reads back must match what its
+    // CPU side projects (e.g. the laser-pointer dot's screen position for the hit test).
 }
 
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {

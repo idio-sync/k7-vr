@@ -71,6 +71,11 @@ bool aim_mode_now();                          // the render camera is the first-
 bool aim_camera(float eye[3], float target[3]);  // the render camera's eye and look-at target (world)
 void aim_set(float yaw, float pitch);         // aim angles (radians), velocities zeroed
 bool aim_widen_clamp(float limit_rad);        // the game's pitch limit (36 degrees) -> +-limit
+// Laser-pointer screens (aim.cpp): the silhouette shot that starts a target.
+bool pointer_install();
+bool pointer_active(float* plane_distance);  // the dot updated since the last call; its plane's distance (game units)
+void pointer_set(bool on, float x, float y);  // steer the dot (game camera eye space, units) from the next update
+void request_scan_point();  // `scanpoint`: scan memory for the next single-point draw's x,y
 void set_gun_param(const std::string& name, const float v[3]);  // `gun` command: scale/pivot/clip/converge/hudmask
 
 Requests control_poll();      // once per frame

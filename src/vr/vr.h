@@ -40,8 +40,8 @@ bool stereo();  // drawing two eyes (Sim or OpenVR)
 // game_xy_ratio = the game projection's y scale / x scale (its aspect), for sim and flat modes.
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]);
 
-// The game camera's own view: identity head and the game's intended projection (undoing FOV
-// inflation). Used for the game-view pass that feeds the game's CPU readbacks.
+// The game camera's own view: identity head and the game's own projection (with the inflated
+// FOV it believes in). Used for the game-view pass that feeds the game's CPU readbacks.
 void game_view(float game_xy_ratio, EyeConsts* out);
 
 // Called once per frame after the game drew it. 3D frames: both eye images plus the HUD
@@ -67,6 +67,10 @@ void set_sim_hand(float yaw_deg, float pitch_deg);
 // and offset from the anchor), so the world stays put while the game camera turns.
 void relock(const Pose& cam_in_anchor, EyeConsts eyes[2]);
 float unit();
+
+// The game camera's real FOV for a while (laser-pointer screens: the game projects the dot with
+// its camera, and its hit test reads the frame, so both must use the FOV it really shows).
+void suspend_inflation(bool suspend);
 
 void recenter();
 void set_mode(Mode m);  // Off <-> Sim from the command file; OpenVR only from the ini
