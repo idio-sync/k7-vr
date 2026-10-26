@@ -18,6 +18,7 @@
 //   hold A[+B...] ms        hold pad buttons
 //   stick lx ly ms          left stick, -1..1
 //   pad A[+B..]|- lx ly [rt] ms   pad buttons, left stick (and right trigger 0..1) together
+//   padhold A[+B..]|- lx ly  pad buttons and left stick held across steps (padhold - 0 0 releases)
 //   rstick rx ry ms         right stick, -1..1
 //   trig l r ms             triggers, 0..1
 //   wait ms                 idle
@@ -67,6 +68,7 @@ static Step g_cur;
 static ULONGLONG g_cur_end;
 static DWORD g_seq;
 static Requests g_pending;  // shot/capture steps that started since the last control_poll
+static Step g_hold;         // `padhold` state
 
 static WORD parse_buttons(const std::string& list) {
     static const struct {
@@ -203,6 +205,14 @@ static void run_line(const std::string& line) {
         s.ms = ms;
         g_steps.push_back(s);
         if (cmd == "press") g_steps.push_back(Step{.ms = 120});
+    } else if (cmd == "padhold") {  // padhold BUTTONS|- LX LY: until the next padhold (padhold - 0 0 releases)
+        std::string buttons;
+        double x = 0, y = 0;
+        ss >> buttons >> x >> y;
+        Step h;
+        if (buttons != "-") h.buttons = parse_buttons(buttons);
+        h.lx = axis(x), h.ly = axis(y);
+        g_steps.push_back(Step{.action = [h] { g_hold = h; }});  // (actions run with g_mx held)
     } else if (cmd == "pad") {  // pad BUTTONS|- LX LY [RT] ms: buttons, left stick (and right trigger) together
         std::string buttons;
         double x = 0, y = 0, rt = 0;
@@ -414,6 +424,9 @@ void pad_apply(XINPUT_STATE* state) {
     std::lock_guard lock(g_mx);
     advance_locked();
     auto& pad = state->Gamepad;
+    // `padhold`: a pad state that stays on across steps (e.g. a stick held while a pair is taken).
+    pad.wButtons |= g_hold.buttons;
+    if (g_hold.lx || g_hold.ly) pad.sThumbLX = g_hold.lx, pad.sThumbLY = g_hold.ly;
     pad.wButtons |= g_cur.buttons;
     if (g_cur.lx || g_cur.ly) {
         pad.sThumbLX = g_cur.lx;
