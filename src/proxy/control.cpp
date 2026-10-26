@@ -6,7 +6,7 @@
 //   recenter / unit M       recentre the VR view / set metres per game unit
 //   view YAW PITCH          simulated head direction from the game camera, degrees (+yaw right, +pitch up)
 //   hand YAW PITCH          simulated right controller direction, degrees (sim mode; aims in aim mode)
-//   gun NAME A [B C]        live aim-mode tuning: scale S / pivot X Y Z / clip Z / converge M / hudmask F
+//   gun NAME A [B C]        live aim-mode tuning: scale S / pivot X Y Z / clip Z / converge M / depth 0|1 / hudmask F
 //   pair                    PNGs of both eyes of the next frame (pair_NNN_L/R.png; OpenVR: also the
 //                           textures handed to the HUD and screen panels)
 //   panels HUD SCREEN       show (1) or hide (0) the HUD and screen overlay panels (OpenVR)

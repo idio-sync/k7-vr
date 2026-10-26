@@ -78,7 +78,7 @@ void pointer_set(bool on, float x, float y);  // steer the dot (game camera eye 
 void request_scan_point();  // `scanpoint`: scan memory for the next single-point draw's x,y
 void request_aim_trace(int frames);  // `aimtrace N`: log aim/camera yaws for N aim-mode frames
 void request_hud_log(int frames);    // `hudlog N`: log the draws routed to the HUD overlay for N frames
-void set_gun_param(const std::string& name, const float v[3]);  // `gun` command: scale/pivot/clip/converge/hudmask
+void set_gun_param(const std::string& name, const float v[3]);  // `gun` command: scale/pivot/clip/converge/depth/hudmask
 
 Requests control_poll();      // once per frame
 void set_capture_snaps(std::vector<unsigned> draws);  // next capture also saves the RT after these draws

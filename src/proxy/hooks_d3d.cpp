@@ -310,7 +310,8 @@ static std::unordered_map<ID3D11RasterizerState*, ID3D11RasterizerState*> g_scis
 //    the world stays put however the game camera turns (the head transforms are rebuilt against
 //    this frame's camera at its first 3D draw, after the game updated it);
 //  - the right controller steers the game's aim: the camera looks from the aim eye at the point
-//    aim_converge_m along the controller's ray, so shots land where the hand points at that range;
+//    where the controller's ray meets the scene (measured in the eye's depth, see "Aim distance"),
+//    so shots land where the hand points at any range (aim_converge_m along the ray without one);
 //  - the first-person arm and gun are moved from the game's aim view into the hand.
 static float g_gun_scale = 0.6f;
 // The gun's grip in the game's aim view (game units). Each character holds the gun elsewhere
@@ -325,7 +326,12 @@ static bool g_pivot_seen;                             // found in this frame's a
 static int g_pivot_still;                             // frames the grip has held still
 static bool g_pivot_locked;                           // the grip is fixed for this aim session
 static float g_gun_clip = 2.0f;                       // the arm (sleeve) is cut off this far behind the grip (units)
-static float g_aim_converge = 10;                     // metres
+static float g_aim_converge = 10;                     // metres, when the ray's hit isn't known
+static bool g_aim_depth = true;                       // aim at the ray's measured hit ([vr] aim_depth, `gun depth`)
+static float g_hit_min = 0.6f, g_hit_max = 60;        // metres along the ray searched: past the gun, to far out
+static bool g_aim_ray_ready;                          // g_laser_pose is this frame's hand (also without a laser)
+static bool g_hit_done;                               // the ray was measured this frame
+static unsigned g_hit_session;                        // aim sessions so far (stale results are dropped)
 static bool g_anchor_set;
 static vr::Pose g_anchor;                             // world pose (game units) of the player's frame
 static bool g_relocked;                               // this frame's head transforms follow its camera
@@ -363,6 +369,7 @@ static void init_draw_buffers() {
     if (buf[0]) g_gun_clip = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_converge = float(_wtof(buf));
+    g_aim_depth = GetPrivateProfileIntW(L"vr", L"aim_depth", 1, ini.c_str()) != 0;
     GetPrivateProfileStringW(L"vr", L"laser_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_laser_length = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"aim_hud_mask", L"", buf, 64, ini.c_str());
@@ -386,7 +393,8 @@ static void init_draw_buffers() {
     g_dev->CreateBuffer(&d, &i0, &g_draw_cb[0]);
     g_dev->CreateBuffer(&d, &i1, &g_draw_cb[1]);
     g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
-    logf("stereo: gun scale %g, aim converges at %g m", g_gun_scale, g_aim_converge);
+    logf("stereo: gun scale %g, aim at the ray's hit %s (else %g m)", g_gun_scale, g_aim_depth ? "on" : "off",
+         g_aim_converge);
 }
 
 void set_gun_param(const std::string& name, const float v[3]) {
@@ -399,9 +407,10 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "laser") g_laser_length = v[0];
     else if (name == "laserdepth") g_laser_depth = v[0] != 0;
     else if (name == "steer") g_steer = v[0] != 0;  // 0: the hand doesn't steer the game's aim (testing)
+    else if (name == "depth") g_aim_depth = v[0] != 0;  // 0: aim at converge M along the ray (the old way)
     else logf("gun: unknown setting '%s'", name.c_str());
-    logf("gun: scale %g pivot %g,%g,%g clip %g converge %g hud mask %g", g_gun_scale, g_gun_pivot[0], g_gun_pivot[1],
-         g_gun_pivot[2], g_gun_clip, g_aim_converge, g_aim_hud_mask);
+    logf("gun: scale %g pivot %g,%g,%g clip %g converge %g depth %d hud mask %g", g_gun_scale, g_gun_pivot[0],
+         g_gun_pivot[1], g_gun_pivot[2], g_gun_clip, g_aim_converge, int(g_aim_depth), g_aim_hud_mask);
 }
 
 // An arm/gun draw in the first frames of an aim session: its model position (model-view
@@ -444,15 +453,27 @@ static void find_gun_pivot() {
     relock_aim();  // same camera and hand, new grip
 }
 
+static bool aim_hit_distance(float* metres);
+
 // Frame start, aim mode: point the game's aim where the hand points.
 static void steer_aim() {
     vr::Pose hand;
     if (!g_steer || !g_anchor_set || !vr::hand_pose(&hand)) return;
-    // Target point in the anchor frame (metres), then its direction from the aim eye in the world.
-    const float c = g_aim_converge;
-    const float p[3] = {hand.m[0][3] - c * hand.m[0][2], hand.m[1][3] - c * hand.m[1][2], hand.m[2][3] - c * hand.m[2][2]};
+    // The game fires from its aim eye, the hand's ray starts at the controller: they meet at the
+    // target point, so it is where the ray hits the scene when that is known.
+    float c = g_aim_converge;
+    if (g_aim_depth) aim_hit_distance(&c);
+    // Target point in the anchor frame (metres), then in the world (game units), then its direction
+    // from the aim eye as the game has it now (the anchor's origin is where it was when aiming began).
+    const float u = vr::unit();
+    const float p[3] = {(hand.m[0][3] - c * hand.m[0][2]) / u, (hand.m[1][3] - c * hand.m[1][2]) / u,
+                        (hand.m[2][3] - c * hand.m[2][2]) / u};
+    float eye[3], tgt[3];
+    if (!aim_camera(eye, tgt))
+        for (int i = 0; i < 3; ++i) eye[i] = g_anchor.m[i][3];
     float d[3];
-    for (int i = 0; i < 3; ++i) d[i] = g_anchor.m[i][0] * p[0] + g_anchor.m[i][1] * p[1] + g_anchor.m[i][2] * p[2];
+    for (int i = 0; i < 3; ++i)
+        d[i] = g_anchor.m[i][0] * p[0] + g_anchor.m[i][1] * p[1] + g_anchor.m[i][2] * p[2] + g_anchor.m[i][3] - eye[i];
     float yaw, pitch;
     vr::aim_angles(d, &yaw, &pitch);
     aim_set(yaw, pitch);
@@ -498,6 +519,7 @@ static void relock_aim() {
     // Game aim view -> anchor: the grip goes to the hand, scaled by gun_scale around the grip.
     const vr::Pose q = vr::compose(vr::inverse(cam), vr::scaled(hand, 1 / u));
     g_laser_pose = q;
+    g_aim_ray_ready = true;
     g_laser_ready = g_laser_length > 0 && gun_has_laser();
     g_laser_from = g_laser_muzzle, g_laser_to = g_laser_length;
     const float s = g_gun_scale;
@@ -711,6 +733,249 @@ static void draw_laser(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv)
         if (p) p->Release();
 }
 
+// ---- Aim distance ----
+// The game fires from its aim eye through the centre of its view; the hand's ray starts at the
+// controller, below and right of the eye. Steered at a fixed point along the ray, the two lines
+// only meet there: nearer walls were hit above and left of the laser. So once per aim-mode frame,
+// at the first HUD draw (the scene's depth is complete), a compute pass marches the hand's ray
+// through the left eye's depth buffer, and steer_aim aims at the first sample behind a surface.
+// Read back a frame or more later without waiting. Samples are spaced in proportion to their
+// distance (~4% apart), so the miss left over is a few % of the eye-to-hand offset.
+constexpr UINT kHitSamples = 128;  // = the shader's thread count
+constexpr int kHitRing = 4;
+static ID3D11ComputeShader* g_hit_cs;
+static ID3D11Buffer* g_hit_cb;
+static ID3D11Buffer* g_hit_buf;  // [0] = kHitSamples - first hit (0: none), [1] = 1 + the last sample in view (0: none)
+static ID3D11UnorderedAccessView* g_hit_uav;
+static ID3D11Buffer* g_hit_trace;  // per-sample float4s (logged while `aimtrace` runs: a stall)
+static ID3D11UnorderedAccessView* g_hit_trace_uav;
+static ID3D11Buffer* g_hit_trace_staging;
+static ID3D11Buffer* g_hit_staging[kHitRing];
+static unsigned g_hit_slot_frame[kHitRing];    // g_frame + 1 when written, 0 = free
+static unsigned g_hit_slot_session[kHitRing];
+static int g_hit_next;                         // the next slot written (the oldest in flight)
+static ID3D11Texture2D* g_hit_depth_tex;       // what g_hit_srv views (the view keeps it alive)
+static ID3D11ShaderResourceView* g_hit_srv;
+static bool g_hit_valid;
+static float g_hit_m;                          // metres along the ray
+static unsigned g_hit_frame;
+static bool g_hit_failed;
+
+static const char kHitCs[] =
+    "Texture2D<float> depth : register(t0);\n"
+    "RWBuffer<uint> result : register(u0);\n"
+    "RWBuffer<float4> trace : register(u1);\n"  // per sample: its depth, the buffer's, the pixel (`aimtrace`)
+    "cbuffer Hit : register(b0) { float4 org; float4 dir; float4 head[3]; float4 px; float4 py; float4 projz; float4 projw;\n"
+    "                             float4 pc; float4 ray; };\n"  // ray: first distance (units), ln(step), depth size
+    "[numthreads(128, 1, 1)] void main(uint i : SV_GroupIndex) {\n"
+    "  float4 p = float4(org.xyz + ray.x * exp(ray.y * i) * dir.xyz, 1);\n"
+    "  float4 e = float4(dot(head[0], p), dot(head[1], p), dot(head[2], p), 1);\n"
+    "  float4 c = float4(dot(e, px), dot(e, py), dot(e, projz), dot(e, projw));\n"
+    "  trace[i] = float4(-1, -1, c.w, 0);\n"
+    "  if (c.w <= 0) return;\n"
+    "  c.z = c.w * pc.w - c.z * pc.z;\n"
+    "  c.xy -= c.w * pc.xy;\n"
+    "  float2 ndc = c.xy / c.w;\n"
+    "  trace[i] = float4(-2, -2, ndc);\n"
+    "  if (abs(ndc.x) >= 1 || abs(ndc.y) >= 1) return;\n"
+    "  uint2 pix = uint2((ndc.x * 0.5 + 0.5) * ray.z, (0.5 - ndc.y * 0.5) * ray.w);\n"
+    "  trace[i] = float4(c.z / c.w, depth[pix], pix);\n"
+    "  InterlockedMax(result[1], i + 1);\n"
+    // The game's depth is cleared to 0 and keeps the nearest = largest value.
+    "  if (depth[pix] > c.z / c.w * 1.003) InterlockedMax(result[0], 128u - i);\n"
+    "}\n";
+
+static bool hit_init() {
+    if (g_hit_cs) return true;
+    if (g_hit_failed) return false;
+    g_hit_failed = true;
+    if (ID3DBlob* cs = compile_hlsl(kHitCs, "cs_5_0", "k7vr_aim_hit")) {
+        D3D11_BUFFER_DESC cbd{11 * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        D3D11_BUFFER_DESC bd{8, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0, 0};
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_UINT;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = 2;
+        D3D11_BUFFER_DESC sd{8, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+        D3D11_BUFFER_DESC td{kHitSamples * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0, 0};
+        D3D11_BUFFER_DESC tsd{kHitSamples * 16, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+        D3D11_UNORDERED_ACCESS_VIEW_DESC tud{};
+        tud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        tud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        tud.Buffer.NumElements = kHitSamples;
+        bool ok = SUCCEEDED(g_dev->CreateComputeShader(cs->GetBufferPointer(), cs->GetBufferSize(), nullptr, &g_hit_cs)) &&
+                  SUCCEEDED(g_dev->CreateBuffer(&cbd, nullptr, &g_hit_cb)) &&
+                  SUCCEEDED(g_dev->CreateBuffer(&bd, nullptr, &g_hit_buf)) &&
+                  SUCCEEDED(g_dev->CreateUnorderedAccessView(g_hit_buf, &ud, &g_hit_uav)) &&
+                  SUCCEEDED(g_dev->CreateBuffer(&td, nullptr, &g_hit_trace)) &&
+                  SUCCEEDED(g_dev->CreateUnorderedAccessView(g_hit_trace, &tud, &g_hit_trace_uav)) &&
+                  SUCCEEDED(g_dev->CreateBuffer(&tsd, nullptr, &g_hit_trace_staging));
+        for (auto& s : g_hit_staging) ok = ok && SUCCEEDED(g_dev->CreateBuffer(&sd, nullptr, &s));
+        g_hit_failed = !ok;
+        cs->Release();
+    }
+    if (g_hit_failed) logf("aim: depth measurement unavailable; aiming at %g m along the ray", g_aim_converge);
+    return !g_hit_failed;
+}
+
+static ID3D11Texture2D* texture_of(ID3D11View* view, D3D11_TEXTURE2D_DESC* desc);
+
+// The left eye's depth, readable by the compute pass (null if its format isn't one we know).
+static ID3D11ShaderResourceView* hit_depth_view(ID3D11DepthStencilView* dsv, UINT* w, UINT* h) {
+    D3D11_TEXTURE2D_DESC d;
+    ID3D11Texture2D* tex = texture_of(dsv, &d);
+    if (!tex || d.SampleDesc.Count != 1 || !(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) return nullptr;
+    *w = d.Width, *h = d.Height;
+    if (tex == g_hit_depth_tex && g_hit_srv) return g_hit_srv;
+    if (g_hit_srv) g_hit_srv->Release(), g_hit_srv = nullptr;
+    g_hit_depth_tex = tex;
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+    vd.Format = d.Format == DXGI_FORMAT_R32_TYPELESS          ? DXGI_FORMAT_R32_FLOAT
+                : d.Format == DXGI_FORMAT_R24G8_TYPELESS      ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS
+                : d.Format == DXGI_FORMAT_R32G8X24_TYPELESS   ? DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS
+                : d.Format == DXGI_FORMAT_R16_TYPELESS        ? DXGI_FORMAT_R16_UNORM
+                                                              : DXGI_FORMAT_UNKNOWN;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    if (vd.Format == DXGI_FORMAT_UNKNOWN || FAILED(g_dev->CreateShaderResourceView(tex, &vd, &g_hit_srv))) {
+        static int logged;
+        if (logged++ < 3) logf("aim: can't read depth format %d", int(d.Format));
+        g_hit_srv = nullptr;
+    }
+    return g_hit_srv;
+}
+
+// At the first HUD draw of an aim-mode frame (`dsv` = the left eye's scene depth).
+static void measure_aim_hit(ID3D11DepthStencilView* dsv) {
+    if (g_hit_done || !g_aim_depth || !g_aim_ray_ready || !dsv) return;
+    g_hit_done = true;
+    if (g_hit_slot_frame[g_hit_next] || !hit_init()) return;  // every slot still in flight
+    UINT w = 0, h = 0;
+    ID3D11ShaderResourceView* srv = hit_depth_view(dsv, &w, &h);
+    if (!srv) return;
+    // The pixel centre from the bound (HUD) constants, as for the laser.
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (it == g_cb.end() || it->second.size() < kPixelCenterOffset + 16) return;
+    const float* f = reinterpret_cast<const float*>(it->second.data());
+    struct {
+        float org[4], dir[4], head[12], px[4], py[4], projz[4], projw[4], pc[4], ray[4];
+    } c{};
+    static_assert(sizeof(c) == 11 * 16, "the shader's Hit constants");
+    const vr::Pose& q = g_laser_pose;  // the hand in the game camera's eye space (game units)
+    for (int i = 0; i < 3; ++i) c.org[i] = q.m[i][3], c.dir[i] = -q.m[i][2];
+    c.org[3] = 1;
+    memcpy(c.head, g_eyes[0].head, sizeof(c.head));
+    memcpy(c.px, g_eyes[0].px, 16);
+    memcpy(c.py, g_eyes[0].py, 16);
+    memcpy(c.projz, g_last_proj + 8, 16);
+    memcpy(c.projw, g_last_proj + 12, 16);
+    memcpy(c.pc, f + kPixelCenterOffset / 4, 16);
+    c.ray[0] = g_hit_min / vr::unit();
+    c.ray[1] = std::log(g_hit_max / g_hit_min) / float(kHitSamples - 1);
+    c.ray[2] = float(w), c.ray[3] = float(h);
+    g_ctx->UpdateSubresource(g_hit_cb, 0, nullptr, &c, 0, 0);
+
+    // The depth can't be read while it is bound for output: unbind the targets for the pass.
+    ID3D11RenderTargetView* old_rtv[kMaxTargets] = {};
+    ID3D11DepthStencilView* old_dsv = nullptr;
+    g_ctx->OMGetRenderTargets(kMaxTargets, old_rtv, &old_dsv);
+    ID3D11ComputeShader* old_cs = nullptr;
+    ID3D11ShaderResourceView* old_srv = nullptr;
+    ID3D11UnorderedAccessView* old_uav[2] = {};
+    ID3D11Buffer* old_cb = nullptr;
+    g_ctx->CSGetShader(&old_cs, nullptr, nullptr);
+    g_ctx->CSGetShaderResources(0, 1, &old_srv);
+    g_ctx->CSGetUnorderedAccessViews(0, 2, old_uav);
+    g_ctx->CSGetConstantBuffers(0, 1, &old_cb);
+    g_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    const UINT zero[4] = {};
+    g_ctx->ClearUnorderedAccessViewUint(g_hit_uav, zero);
+    g_ctx->CSSetShader(g_hit_cs, nullptr, 0);
+    g_ctx->CSSetShaderResources(0, 1, &srv);
+    ID3D11UnorderedAccessView* uavs[2] = {g_hit_uav, g_hit_trace_uav};
+    g_ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+    g_ctx->CSSetConstantBuffers(0, 1, &g_hit_cb);
+    g_ctx->Dispatch(1, 1, 1);
+    ID3D11ShaderResourceView* no_srv = nullptr;
+    g_ctx->CSSetShaderResources(0, 1, &no_srv);  // before the depth is bound for output again
+    g_ctx->CSSetUnorderedAccessViews(0, 2, old_uav, nullptr);
+    g_ctx->CSSetShaderResources(0, 1, &old_srv);
+    g_ctx->CSSetConstantBuffers(0, 1, &old_cb);
+    g_ctx->CSSetShader(old_cs, nullptr, 0);
+    g_ctx->OMSetRenderTargets(kMaxTargets, old_rtv, old_dsv);
+    for (IUnknown* p : {static_cast<IUnknown*>(old_cs), static_cast<IUnknown*>(old_srv), static_cast<IUnknown*>(old_uav[0]),
+                        static_cast<IUnknown*>(old_uav[1]), static_cast<IUnknown*>(old_cb), static_cast<IUnknown*>(old_dsv)})
+        if (p) p->Release();
+    for (auto v : old_rtv)
+        if (v) v->Release();
+
+    if (g_aim_trace > 0) {  // every 8th sample: distance, its depth, the buffer's, the pixel
+        g_ctx->CopyResource(g_hit_trace_staging, g_hit_trace);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(g_ctx->Map(g_hit_trace_staging, 0, D3D11_MAP_READ, 0, &m))) {
+            const float* t = static_cast<const float*>(m.pData);
+            std::string s;
+            for (UINT i = 0; i < kHitSamples; i += 8)
+                appendf(s, " | %.2fm %.4f %.4f %.0f,%.0f", g_hit_min * std::exp(c.ray[1] * float(i)), t[i * 4], t[i * 4 + 1],
+                        t[i * 4 + 2], t[i * 4 + 3]);
+            g_ctx->Unmap(g_hit_trace_staging, 0);
+            logf("aimtrace frame %u: ray %.2f,%.2f,%.2f dir %.2f,%.2f,%.2f depth %ux%u%s", g_frame, c.org[0], c.org[1],
+                 c.org[2], c.dir[0], c.dir[1], c.dir[2], w, h, s.c_str());
+        }
+    }
+
+    g_ctx->CopyResource(g_hit_staging[g_hit_next], g_hit_buf);
+    g_hit_slot_frame[g_hit_next] = g_frame + 1;
+    g_hit_slot_session[g_hit_next] = g_hit_session;
+    g_hit_next = (g_hit_next + 1) % kHitRing;
+}
+
+// The results that are ready, oldest first; the newest of this aim session wins.
+static void poll_aim_hits() {
+    for (int k = 0; k < kHitRing; ++k) {
+        const int s = (g_hit_next + k) % kHitRing;
+        if (!g_hit_slot_frame[s]) continue;
+        D3D11_MAPPED_SUBRESOURCE m;
+        const HRESULT hr = g_ctx->Map(g_hit_staging[s], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) break;  // and the newer ones too
+        const unsigned frame = g_hit_slot_frame[s] - 1;
+        const bool mine = g_hit_slot_session[s] == g_hit_session;
+        g_hit_slot_frame[s] = 0;
+        if (FAILED(hr)) continue;
+        uint32_t r[2];
+        memcpy(r, m.pData, sizeof(r));
+        g_ctx->Unmap(g_hit_staging[s], 0);
+        if (!mine) continue;
+        // Nothing known when the ray starts behind something (the arm while it is raised, a hand
+        // inside a wall) or leaves the eye's view before meeting anything.
+        const unsigned hit = r[0] ? kHitSamples - r[0] : kHitSamples;
+        if (hit == 0 || (hit == kHitSamples && r[1] < kHitSamples)) {
+            g_hit_valid = false;
+            continue;
+        }
+        const float step = std::log(g_hit_max / g_hit_min) / float(kHitSamples - 1);
+        // Between the sample before the first one behind a surface and that one; the far end if none.
+        g_hit_m = hit < kHitSamples ? g_hit_min * std::exp(step * (float(hit) - 0.5f)) : g_hit_max;
+        if (!g_hit_valid) logf("aim: ray hits at %.2f m", g_hit_m);
+        g_hit_valid = true;
+        g_hit_frame = frame;
+    }
+}
+
+// Where the hand's ray meets the scene (metres along it), from a recent frame. False: unknown.
+static bool aim_hit_distance(float* metres) {
+    if (!g_hit_cs) return false;
+    poll_aim_hits();
+    if (!g_hit_valid || g_frame - g_hit_frame > 8) return false;
+    *metres = g_hit_m;
+    if (g_aim_trace > 0) logf("aimtrace frame %u: ray hit %.2f m (frame %u)", g_frame, g_hit_m, g_hit_frame);
+    return true;
+}
+
 // Laser-pointer screens (the silhouette shot that starts a target): the game's dot goes where
 // the hand's ray meets its plane in front of the game camera, and the laser runs from the
 // controller to it. Outside aim mode the player's frame is the game camera's eye space.
@@ -742,6 +1007,8 @@ static void set_eye_offsets() {
         g_pivot_frames = g_pivot_still = 0;
         g_pivot_locked = false;
         g_prev_cam_valid = false;
+        ++g_hit_session;
+        g_hit_valid = false;
     } else if (aim) {
         ++g_pivot_frames;
     }
@@ -751,6 +1018,7 @@ static void set_eye_offsets() {
     g_gun_run = 0;
     g_relocked = false;
     g_laser_ready = g_laser_done = false;
+    g_aim_ray_ready = g_hit_done = false;
     g_letterbox_on = false;
     if (g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
@@ -1441,6 +1709,7 @@ static void draw_stereo(DrawFn draw) {
         // The laser goes in after the whole scene (it doesn't write depth, so later draws would
         // cover it) and before the HUD.
         if (g_hud_log > 0) log_hud_draw();
+        if (g_aim_mode) measure_aim_hit(dsv);  // where the hand's ray meets the scene (with or without a laser)
         if (g_aim_mode || g_pointer_mode) draw_laser(rtv[0], dsv);
         // Laser-pointer screens: the game's own 2D beam (a line to the dot) gives way to ours.
         D3D11_PRIMITIVE_TOPOLOGY topo;
