@@ -2066,6 +2066,18 @@ static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthSten
     mirror_clear_dsv(dsv, flags, d, st);
 }
 
+// A texture the CPU reads (the game's readback staging). Copies into one come from the game view
+// even when the eye targets keep the game's size (sim mode without eye_res): the eye images are
+// head-tracked, and the game's hit tests (the tutorial silhouette shot) read these.
+static bool cpu_readable(ID3D11Resource* res) {
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    D3D11_TEXTURE2D_DESC d;
+    static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+    return (d.CPUAccessFlags & D3D11_CPU_ACCESS_READ) != 0;
+}
+
 static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID3D11Resource* dst, UINT dsub, UINT x,
                                                       UINT y, UINT z, ID3D11Resource* src, UINT ssub,
                                                       const D3D11_BOX* box) {
@@ -2089,7 +2101,7 @@ static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID
     }
     const Resized* rs = resized_info(src);
     const Resized* rd = resized_info(dst);
-    if (ID3D11Texture2D* g = vr::stereo() && rs && !rd ? gv_tex(src, false) : nullptr) {
+    if (ID3D11Texture2D* g = vr::stereo() && (rs || cpu_readable(dst)) && !rd ? gv_tex(src, false) : nullptr) {
         real_of(c)->CopySubresourceRegion(dst, dsub, x, y, z, g, ssub, box);  // the game's view, for readbacks
         return;
     }
@@ -2118,7 +2130,7 @@ static void STDMETHODCALLTYPE w_CopyResource(ID3D11DeviceContext* c, ID3D11Resou
     }
     const Resized* rs = resized_info(src);
     const Resized* rd = resized_info(dst);
-    if (ID3D11Texture2D* g = vr::stereo() && rs && !rd ? gv_tex(src, false) : nullptr) {
+    if (ID3D11Texture2D* g = vr::stereo() && (rs || cpu_readable(dst)) && !rd ? gv_tex(src, false) : nullptr) {
         real_of(c)->CopyResource(dst, g);  // the game's view, for readbacks
         return;
     }
