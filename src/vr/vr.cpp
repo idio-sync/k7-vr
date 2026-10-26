@@ -280,6 +280,7 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
     for (int eye = 0; eye < 2; ++eye) {
         eye_space_transform(compose(g_rel, eye_to_head[eye]), g_unit, eyes[eye].head);
         eyes[eye].flags[0] = 1;
+        eyes[eye].flags[1] = 0;  // set again by the aim-mode relock
     }
 }
 

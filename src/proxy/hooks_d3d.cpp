@@ -211,6 +211,11 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
                 appendf(s, " %s", ortho ? "ORTHO" : "PERSP");
                 append_matrix(s, "proj", p, 4);
                 append_matrix(s, "mv0", f, 3);
+                // Texture generation: TEXMTX0 (register 30) and post-transform matrices 0-1
+                // (registers 96+), which the template applies to eye-space positions.
+                append_matrix(s, "tm0", f + 30 * 4, 3);
+                append_matrix(s, "pt0", f + 96 * 4, 3);
+                append_matrix(s, "pt1", f + 99 * 4, 3);
             } else if (bytes.size() >= 64) {
                 append_matrix(s, "m", f, 4);
             }
@@ -343,6 +348,7 @@ static float g_laser_length = 30;                     // metres; [vr] laser_m, 0
 static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden in aim mode (the reticle)
 static bool g_laser_depth = true;                     // walls hide the laser (`gun laserdepth 0`: debugging)
 static bool g_steer = true;                           // the hand steers the game's aim / pointer (`gun steer 0`)
+static bool g_texgen_ref = true;                      // screen gradients from the aim-start camera ([vr] texgen_ref, `gun texref`)
 static bool g_laser_ready;                            // g_laser_pose is this frame's
 static vr::Pose g_laser_pose;                         // the hand in the game camera's eye space (game units)
 static float g_laser_from, g_laser_to;                // this frame's beam, metres along the hand's ray
@@ -370,6 +376,7 @@ static void init_draw_buffers() {
     GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_converge = float(_wtof(buf));
     g_aim_depth = GetPrivateProfileIntW(L"vr", L"aim_depth", 1, ini.c_str()) != 0;
+    g_texgen_ref = GetPrivateProfileIntW(L"vr", L"texgen_ref", 1, ini.c_str()) != 0;
     GetPrivateProfileStringW(L"vr", L"laser_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_laser_length = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"aim_hud_mask", L"", buf, 64, ini.c_str());
@@ -407,6 +414,7 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "laser") g_laser_length = v[0];
     else if (name == "laserdepth") g_laser_depth = v[0] != 0;
     else if (name == "steer") g_steer = v[0] != 0;  // 0: the hand doesn't steer the game's aim (testing)
+    else if (name == "texref") g_texgen_ref = v[0] != 0;  // 0: gradients follow the game camera (as before)
     else if (name == "depth") g_aim_depth = v[0] != 0;  // 0: aim at converge M along the ray (the old way)
     else logf("gun: unknown setting '%s'", name.c_str());
     logf("gun: scale %g pivot %g,%g,%g clip %g converge %g depth %d hud mask %g", g_gun_scale, g_gun_pivot[0],
@@ -503,15 +511,24 @@ static void relock_aim() {
     const float u = vr::unit();
     // The game draws each frame with the camera it reported one frame earlier (measured with
     // aimtrace: the manager's camera at the first draw is the next frame's), so lock against that.
-    static vr::Pose drawn_cam, next_cam;
+    static vr::Pose drawn_cam, next_cam, ref_cam;
     if (first) {
         const vr::Pose now = vr::compose(vr::inverse(g_anchor), vr::look_at(eye, tgt));  // game units
+        if (!g_prev_cam_valid) ref_cam = now;  // the camera when aiming began
         drawn_cam = g_prev_cam_valid ? next_cam : now;
         next_cam = now;
         g_prev_cam_valid = true;
     }
     const vr::Pose cam = drawn_cam;
     vr::relock(vr::scaled(cam, u), g_eyes);
+    // The game's screen-space gradients are generated from the reference camera's view, not the
+    // hand-steered one (see patch_texgen in hooks_compile.cpp). [vr] texgen_ref=0 / `gun texref 0`: off.
+    const vr::Pose to_ref = vr::compose(vr::inverse(ref_cam), cam);
+    for (int e = 0; e < 2; ++e) {
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 4; ++j) g_eyes[e].ref[i * 4 + j] = to_ref.m[i][j];
+        g_eyes[e].flags[1] = g_texgen_ref ? 1.f : 0.f;
+    }
     for (int e = 0; e < 2; ++e) g_ctx->UpdateSubresource(g_eye_cb[e], 0, nullptr, &g_eyes[e], 0, 0);
 
     vr::Pose hand;

@@ -34,6 +34,8 @@ struct EyeConsts {
     float px[4];      // clip x row (used when flags[0] != 0)
     float py[4];      // clip y row
     float flags[4];   // [0] = replace the game's x/y projection rows for perspective draws
+                      // [1] = texture generation from eye-space positions uses `ref`
+    float ref[12];    // 3x4: game camera eye space -> a reference camera's (aim mode; game units)
 };
 
 enum class Mode { Off, Sim, OpenVR };

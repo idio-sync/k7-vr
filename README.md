@@ -83,6 +83,7 @@ Under `[vr]` in `k7vr\k7vr.ini` (all are listed at the top of `src\vr\vr.h`):
 | `laser_m` | 30 | laser length (0 = no laser) |
 | `aim_hud_mask` | 0.6 | width of the HUD's centre band hidden in aim mode (the game's crosshair) |
 | `aim_pitch_limit` | 80 | the game's aim pitch limit, degrees (the game allows 36) |
+| `texgen_ref` | 1 | in aim mode, the game's screen-space colour gradients stay as they were when aiming began instead of shifting as the hand turns the game camera (0 = the game's own) |
 
 ## Playtest checklist (next headset session)
 

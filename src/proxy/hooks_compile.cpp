@@ -6,6 +6,7 @@
 #include <d3dcommon.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -23,6 +24,31 @@ uint64_t dxbc_hash(const void* bytecode, size_t size) {
     uint64_t h = 0;
     if (size >= 12 && memcmp(bytecode, "DXBC", 4) == 0) memcpy(&h, static_cast<const uint8_t*>(bytecode) + 4, 8);
     return h;
+}
+
+// Texture coordinates generated from eye-space positions (a position matrix, GX_PNMTX0-9 =
+// posTexMatMem[0..29]) are camera-relative: the game colours walls and floors through screen
+// projections of them (post-transform matrices that map the game camera's view to 0..1, sampling
+// vertical gradient textures). In aim mode the hand turns the game camera, so with k7_flags.y set
+// those positions are first moved into a reference camera's eye space (k7_ref, the camera when
+// aiming began) and the gradients stay where they were. The first-person arm and gun (k7_draw.x)
+// keep the game's own.
+static void patch_texgen(std::string& src) {
+    const char* kSource = "inTexCoord = float4(_in.inPosition, 1);";
+    const char* kZ = "outTexCoord.z = dot(inTexCoord, posTexMatMem[";
+    for (size_t at = src.find(kSource); at != std::string::npos; at = src.find(kSource, at + 1)) {
+        const size_t z = src.find(kZ, at);
+        const size_t next = src.find("_out.outTexCoord", at);
+        if (z == std::string::npos || (next != std::string::npos && z > next)) continue;  // 2x4 matrix: no z
+        const int index = atoi(src.c_str() + z + strlen(kZ));
+        if (index >= 30) continue;  // a texture matrix or the identity: object space
+        const size_t end = src.find(';', z);
+        if (end == std::string::npos) continue;
+        src.insert(end + 1,
+                   "\n\tif (k7_flags.y != 0 && k7_draw.x == 0) outTexCoord.xyz = float3(dot(k7_ref[0], "
+                   "float4(outTexCoord.xyz, 1)), dot(k7_ref[1], float4(outTexCoord.xyz, 1)), dot(k7_ref[2], "
+                   "float4(outTexCoord.xyz, 1)));  // k7vr texgen");
+    }
 }
 
 // Stereo patch for the GX vertex template: a per-eye head transform (3x4, eye-space rotation
@@ -56,9 +82,10 @@ static bool patch_stereo(std::string& src) {
                "dot(k7_obj[1], outPos), dot(k7_obj[2], outPos));  // k7vr per-draw\n\t"
                "if (projMatrix[3].w == 0) outPos.xyz = float3(dot(k7_head[0], outPos), dot(k7_head[1], outPos), "
                "dot(k7_head[2], outPos));  // k7vr stereo\n\t");
+    patch_texgen(src);
     src.insert(consts,
-               "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; float4 k7_px; float4 k7_py; float4 k7_flags; };"
-               "  // k7vr stereo\n"
+               "cbuffer K7Stereo : register(b12) { float4 k7_head[3]; float4 k7_px; float4 k7_py; float4 k7_flags; "
+               "float4 k7_ref[3]; };  // k7vr stereo\n"
                "cbuffer K7Draw : register(b13) { float4 k7_obj[3]; float4 k7_draw; };  // k7vr per-draw\n\n");
     src.insert(out_end, "\tfloat k7clip : SV_ClipDistance0;  // k7vr per-draw\n");
     return true;
