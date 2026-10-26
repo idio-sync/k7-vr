@@ -458,6 +458,7 @@ static void update_panel(Panel& p, ID3D11Texture2D* src) {
 }
 
 static ID3D11Texture2D* g_screen_tex;
+static bool g_show_hud = true, g_show_screen = true;
 static ID3D11Texture2D* g_submitted[3];  // this frame's left, right, screen as sent (diagnostics)
 
 ID3D11Texture2D* submitted(int which) { return which >= 0 && which < 3 ? g_submitted[which] : nullptr; }
@@ -478,8 +479,16 @@ void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud
         static int errors;
         if (e != ::vr::VRCompositorError_None && errors++ < 10) logf("vr: Submit eye %d -> %d", eye, int(e));
     }
-    update_panel(g_hud_panel, hud);
-    update_panel(g_screen_panel, screen);
+    update_panel(g_hud_panel, g_show_hud ? hud : nullptr);
+    update_panel(g_screen_panel, g_show_screen ? screen : nullptr);
+}
+
+ID3D11Texture2D* panel_texture(int which) { return which == 0 ? g_hud_panel.copy : g_screen_panel.copy; }
+
+void set_panels(bool hud, bool screen) {
+    g_show_hud = hud;
+    g_show_screen = screen;
+    logf("vr: panels hud %d screen %d", int(hud), int(screen));
 }
 
 }  // namespace k7::vr

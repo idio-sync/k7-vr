@@ -784,6 +784,17 @@ static ID3D11Texture2D* texture_of(ID3D11View* view, D3D11_TEXTURE2D_DESC* desc)
     return tex;
 }
 
+// Twins and views dropped mid-frame may still be bound, or picked for this draw's other slots
+// or for the frame's hand-off to the headset: they are released after the frame is presented.
+static std::vector<IUnknown*> g_retired;
+static void retire(IUnknown* p) {
+    if (p) g_retired.push_back(p);
+}
+static void release_retired() {
+    for (IUnknown* p : g_retired) p->Release();
+    g_retired.clear();
+}
+
 static ID3D11Texture2D* twin_tex(ID3D11Resource* res, bool create) {
     if (!res || res == g_backbuffer) return nullptr;
     D3D11_RESOURCE_DIMENSION dim;
@@ -797,11 +808,22 @@ static ID3D11Texture2D* twin_tex(ID3D11Resource* res, bool create) {
         it->second->GetDesc(&t);
         if (t.Width == d.Width && t.Height == d.Height && t.Format == d.Format && t.ArraySize == d.ArraySize)
             return it->second;
-        // The game freed this texture and made a different one at the same address.
-        it->second->Release();
+        // The game freed this texture and made a different one at the same address: drop the
+        // old twin and the views of it (other textures' twin views stay valid).
+        ID3D11Texture2D* old = it->second;
         g_twins.erase(it);
-        for (auto& v : g_twin_views) v.second->Release();
-        g_twin_views.clear();
+        for (auto v = g_twin_views.begin(); v != g_twin_views.end();) {
+            ID3D11Resource* of = nullptr;
+            v->second->GetResource(&of);
+            of->Release();
+            if (of == old) {
+                retire(v->second);
+                v = g_twin_views.erase(v);
+            } else {
+                ++v;
+            }
+        }
+        retire(old);
     }
     // Only textures that can be sampled later need a per-eye copy (this also skips the backbuffer,
     // whose pointer isn't known until the first Present).
@@ -819,12 +841,21 @@ static ID3D11Texture2D* twin_tex(ID3D11Resource* res, bool create) {
 // twins are used (sampled textures that no eye ever rendered to stay shared).
 template <typename V>
 static V* twin_view(V* view, bool create) {
-    auto it = g_twin_views.find(view);
-    if (it != g_twin_views.end()) return static_cast<V*>(it->second);
     ID3D11Resource* res = nullptr;
     view->GetResource(&res);
     res->Release();
     ID3D11Texture2D* twin = twin_tex(res, create);
+    // The game frees views and makes new ones, and a new view can land at a freed one's address
+    // while its texture is new: a cached entry only counts if it is a view of this texture's twin.
+    auto it = g_twin_views.find(view);
+    if (it != g_twin_views.end()) {
+        ID3D11Resource* cached = nullptr;
+        it->second->GetResource(&cached);
+        cached->Release();
+        if (twin && cached == twin) return static_cast<V*>(it->second);
+        retire(it->second);
+        g_twin_views.erase(it);
+    }
     if (!twin) return nullptr;
     V* out = nullptr;
     HRESULT hr = E_FAIL;
@@ -914,6 +945,10 @@ static bool samples_eye_image() {
     }
     return eye;
 }
+
+// `hudlog N`: for N frames, log each draw that goes to the HUD overlay and what it samples.
+static int g_hud_log;
+void request_hud_log(int frames) { g_hud_log = frames; }
 
 // HUD artwork (sprites, text) samples a texture; untextured full-screen quads are dims, fades
 // and flashes that belong to the eyes.
@@ -1074,14 +1109,28 @@ struct Resized {
     UINT ow, oh;    // the size the game asked for
     UINT rw, rh;    // the real size
 };
+// Read from any thread (GetDesc, the game's loader creating textures), written by texture
+// creation: behind a lock. Entries are nodes, so pointers to them stay valid until their own
+// erase, which only happens once the texture is gone and its address is reused.
 static std::unordered_map<ID3D11Resource*, Resized> g_resized;
+static SRWLOCK g_resized_lock = SRWLOCK_INIT;
 static UINT g_orig_w, g_orig_h;  // the size the game asked for (its 4:3 targets)
 static uintptr_t g_exe_lo, g_exe_hi;
 
 static const Resized* resized_info(ID3D11Resource* res) {
-    if (!res || g_resized.empty()) return nullptr;
+    if (!res) return nullptr;
+    AcquireSRWLockShared(&g_resized_lock);
     auto it = g_resized.find(res);
-    return it == g_resized.end() ? nullptr : &it->second;
+    const Resized* r = it == g_resized.end() ? nullptr : &it->second;
+    ReleaseSRWLockShared(&g_resized_lock);
+    return r;
+}
+
+static bool any_resized() {
+    AcquireSRWLockShared(&g_resized_lock);
+    const bool any = !g_resized.empty();
+    ReleaseSRWLockShared(&g_resized_lock);
+    return any;
 }
 
 using Tex2DGetDesc_t = void(STDMETHODCALLTYPE*)(ID3D11Texture2D*, D3D11_TEXTURE2D_DESC*);
@@ -1112,7 +1161,9 @@ static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11
         nd.Height = h;
         HRESULT hr = o_CreateTexture2D(d, &nd, init, out);
         if (SUCCEEDED(hr) && out && *out) {
+            AcquireSRWLockExclusive(&g_resized_lock);
             g_resized[*out] = {float(w) / float(desc->Width), float(h) / float(desc->Height), desc->Width, desc->Height, w, h};
+            ReleaseSRWLockExclusive(&g_resized_lock);
             g_orig_w = desc->Width;
             g_orig_h = desc->Height;
             vr::set_content_aspect(float(desc->Width) / float(desc->Height));
@@ -1130,7 +1181,13 @@ static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11
     }
     // A texture the game creates "like" a resized one (it sees the original size) is made at
     // that size: its readback staging textures, copy destinations.
-    return o_CreateTexture2D(d, desc, init, out);
+    const HRESULT hr = o_CreateTexture2D(d, desc, init, out);
+    if (SUCCEEDED(hr) && out && *out && resized_info(*out)) {  // a freed resized texture's address, reused
+        AcquireSRWLockExclusive(&g_resized_lock);
+        g_resized.erase(*out);
+        ReleaseSRWLockExclusive(&g_resized_lock);
+    }
+    return hr;
 }
 
 // Scales the bound viewports and scissors to a resized render target for one draw.
@@ -1204,15 +1261,24 @@ static std::unordered_map<ID3D11Resource*, ID3D11Texture2D*> g_gv_tex;  // scene
 static std::unordered_map<ID3D11View*, ID3D11View*> g_gv_views;
 
 static ID3D11Texture2D* gv_tex(ID3D11Resource* res, bool create) {
+    if (!res) return nullptr;
     auto it = g_gv_tex.find(res);
-    if (it != g_gv_tex.end()) return it->second;
-    if (!create || !res) return nullptr;
+    if (it == g_gv_tex.end() && !create) return nullptr;
     D3D11_RESOURCE_DIMENSION dim;
     res->GetType(&dim);
     if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return nullptr;
     D3D11_TEXTURE2D_DESC d;  // the size the game asked for, like its readback copies
     static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
     if (const Resized* r = resized_info(res)) d.Width = r->ow, d.Height = r->oh;
+    if (it != g_gv_tex.end()) {
+        D3D11_TEXTURE2D_DESC have;
+        it->second->GetDesc(&have);
+        if (have.Width == d.Width && have.Height == d.Height && have.Format == d.Format) return it->second;
+        // The game freed this texture and made a different one at the same address.
+        retire(it->second);
+        g_gv_tex.erase(it);
+        if (!create) return nullptr;
+    }
     d.MiscFlags &= ~UINT(D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
                          D3D11_RESOURCE_MISC_GDI_COMPATIBLE);
     ID3D11Texture2D* t = nullptr;
@@ -1224,13 +1290,19 @@ static ID3D11Texture2D* gv_tex(ID3D11Resource* res, bool create) {
 
 template <typename V>
 static V* gv_view(V* view, bool create) {
-    auto it = g_gv_views.find(view);
-    if (it != g_gv_views.end()) return static_cast<V*>(it->second);
-    if (!create) return nullptr;
     ID3D11Resource* res = nullptr;
     view->GetResource(&res);
     res->Release();
-    ID3D11Texture2D* t = gv_tex(res, true);
+    ID3D11Texture2D* t = gv_tex(res, create);
+    auto it = g_gv_views.find(view);  // only a view of this texture's game view counts (see twin_view)
+    if (it != g_gv_views.end()) {
+        ID3D11Resource* cached = nullptr;
+        it->second->GetResource(&cached);
+        cached->Release();
+        if (t && cached == t) return static_cast<V*>(it->second);
+        retire(it->second);
+        g_gv_views.erase(it);
+    }
     if (!t) return nullptr;
     V* out = nullptr;
     HRESULT hr;
@@ -1267,6 +1339,40 @@ static void draw_game_view(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D
     scale.rescale();
 }
 
+static void log_hud_draw() {
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    uint32_t slots = 0xFFFFFFFF;
+    if (ps) {
+        UINT size = sizeof(slots);
+        if (FAILED(ps->GetPrivateData(kTextureSlotsGuid, &size, &slots))) slots = 0xFFFFFFFF;
+    }
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    std::string s;
+    appendf(s, "hudlog frame %u: ps=%016llx topo=%d slots=0x%x", g_frame, shader_hash(ps), int(topo), slots);
+    if (ps) ps->Release();
+    ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+    for (UINT i = 0; i < kMaxTextures; ++i) {
+        if (!srv[i]) continue;
+        ID3D11Resource* res = nullptr;
+        srv[i]->GetResource(&res);
+        D3D11_RESOURCE_DIMENSION dim;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC d;
+            static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+            appendf(s, " t%u=%p(%ux%u f%d usage %d bind 0x%x%s%s%s)", i, (void*)res, d.Width, d.Height, d.Format,
+                    int(d.Usage), d.BindFlags, g_twins.count(res) ? " twin" : "",
+                    resized_info(res) ? " resized" : "", g_gv_tex.count(res) ? " gv-src" : "");
+        }
+        res->Release();
+        srv[i]->Release();
+    }
+    logf("%s", s.c_str());
+}
+
 static bool points_or_lines() {
     D3D11_PRIMITIVE_TOPOLOGY t;
     g_ctx->IAGetPrimitiveTopology(&t);
@@ -1277,7 +1383,7 @@ static bool points_or_lines() {
 // Runs `draw` for the left eye, then for the right eye on twins (see the section comment).
 template <typename DrawFn>
 static void draw_stereo(DrawFn draw) {
-    if (!vr::stereo() && g_resized.empty()) {
+    if (!vr::stereo() && !any_resized()) {
         draw();
         return;
     }
@@ -1334,6 +1440,7 @@ static void draw_stereo(DrawFn draw) {
         hud_target_like(rtv[0])) {  // once, into the overlay
         // The laser goes in after the whole scene (it doesn't write depth, so later draws would
         // cover it) and before the HUD.
+        if (g_hud_log > 0) log_hud_draw();
         if (g_aim_mode || g_pointer_mode) draw_laser(rtv[0], dsv);
         // Laser-pointer screens: the game's own 2D beam (a line to the dot) gives way to ours.
         D3D11_PRIMITIVE_TOPOLOGY topo;
@@ -1958,7 +2065,8 @@ static void limit_background_rate(IDXGISwapChain* sc) {
     sc->GetDesc(&d);
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    if (IsIconic(d.OutputWindow) && last.QuadPart) {
+    static const bool uncapped = GetEnvironmentVariableW(L"K7VR_UNCAPPED", nullptr, 0) > 0;
+    if (IsIconic(d.OutputWindow) && last.QuadPart && !uncapped) {
         const LONGLONG period = freq.QuadPart / 60;
         LONGLONG elapsed = now.QuadPart - last.QuadPart;
         if (elapsed < period) {
@@ -1973,6 +2081,7 @@ static void limit_background_rate(IDXGISwapChain* sc) {
 
 static void end_frame(IDXGISwapChain* sc) {
     ++g_frame;
+    if (g_hud_log > 0) --g_hud_log;
     g_draws_last = g_draws;
     g_draws = 0;
 
@@ -2000,6 +2109,18 @@ static void end_frame(IDXGISwapChain* sc) {
     // Hand the frame just drawn to the headset. 3D frames: each eye's final image and the HUD.
     // 2D frames (no perspective draw: menus, FMVs, loading): black eyes, the mono image on a screen.
     if (vr::stereo()) {
+        {  // how many presented frames had a 3D scene, and how many 2D ones came with no draws at all
+            static unsigned n3d, n2d, n2d_empty;
+            static ULONGLONG t0 = GetTickCount64();
+            if (g_frame_3d) ++n3d;
+            else if (g_draws_last == 0) ++n2d_empty;
+            else ++n2d;
+            if (GetTickCount64() - t0 >= 5000) {
+                logf("frames: 3D %u, 2D %u, 2D without draws %u", n3d, n2d, n2d_empty);
+                n3d = n2d = n2d_empty = 0;
+                t0 = GetTickCount64();
+            }
+        }
         ID3D11Texture2D* left = nullptr;
         ID3D11Texture2D* right = nullptr;
         ID3D11Texture2D* screen = nullptr;
@@ -2038,6 +2159,14 @@ static void end_frame(IDXGISwapChain* sc) {
                 swprintf(name, 64, L"pair_%03u_hud_alpha.png", g_pair_index);
                 save_texture(hud, path_in(name), true);
             }
+            for (int p = 0; p < 2; ++p)
+                if (ID3D11Texture2D* t = vr::mode() == vr::Mode::OpenVR ? vr::panel_texture(p) : nullptr) {
+                    swprintf(name, 64, p ? L"pair_%03u_panel_screen.png" : L"pair_%03u_panel_hud.png", g_pair_index);
+                    save_texture(t, path_in(name));
+                    swprintf(name, 64, p ? L"pair_%03u_panel_screen_alpha.png" : L"pair_%03u_panel_hud_alpha.png",
+                             g_pair_index);
+                    save_texture(t, path_in(name), true);
+                }
             if (screen) {
                 swprintf(name, 64, L"pair_%03u_screen.png", g_pair_index);
                 save_texture(vr::submitted(2) ? vr::submitted(2) : screen, path_in(name));
@@ -2056,6 +2185,7 @@ static void end_frame(IDXGISwapChain* sc) {
         g_pair = false;
         logf("pair: stereo is off");
     }
+    release_retired();  // the frame has been handed off: nothing holds the dropped twins and views now
 
     Requests req = control_poll();
     static bool f10_down;

@@ -77,6 +77,7 @@ bool pointer_active(float* plane_distance);  // the dot updated since the last c
 void pointer_set(bool on, float x, float y);  // steer the dot (game camera eye space, units) from the next update
 void request_scan_point();  // `scanpoint`: scan memory for the next single-point draw's x,y
 void request_aim_trace(int frames);  // `aimtrace N`: log aim/camera yaws for N aim-mode frames
+void request_hud_log(int frames);    // `hudlog N`: log the draws routed to the HUD overlay for N frames
 void set_gun_param(const std::string& name, const float v[3]);  // `gun` command: scale/pivot/clip/converge/hudmask
 
 Requests control_poll();      // once per frame

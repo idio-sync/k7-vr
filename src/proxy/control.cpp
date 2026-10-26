@@ -7,7 +7,10 @@
 //   view YAW PITCH          simulated head direction from the game camera, degrees (+yaw right, +pitch up)
 //   hand YAW PITCH          simulated right controller direction, degrees (sim mode; aims in aim mode)
 //   gun NAME A [B C]        live aim-mode tuning: scale S / pivot X Y Z / clip Z / converge M / hudmask F
-//   pair                    PNGs of both eyes of the next frame (pair_NNN_L/R.png)
+//   pair                    PNGs of both eyes of the next frame (pair_NNN_L/R.png; OpenVR: also the
+//                           textures handed to the HUD and screen panels)
+//   panels HUD SCREEN       show (1) or hide (0) the HUD and screen overlay panels (OpenVR)
+//   hudlog [N]              log the draws that go to the HUD overlay for N frames (default 1)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
 //   dumpf ADDR N [TAG] / dumpptr PTR OFF N TAG   log N floats (memscan.cpp)
@@ -163,6 +166,10 @@ static void run_line(const std::string& line) {
         float v[3] = {};
         ss >> name >> v[0] >> v[1] >> v[2];
         g_steps.push_back(Step{.action = [=] { set_gun_param(name, v); }});
+    } else if (cmd == "panels") {
+        int hud = 1, screen = 1;
+        ss >> hud >> screen;
+        g_steps.push_back(Step{.action = [=] { vr::set_panels(hud != 0, screen != 0); }});
     } else if (cmd == "handpitch") {
         float deg = 0;
         ss >> deg;
@@ -306,6 +313,10 @@ static void run_line(const std::string& line) {
         float deg = 0;
         ss >> deg;
         g_steps.push_back(Step{.action = [=] { set_fov_inflate(deg); }});
+    } else if (cmd == "hudlog") {
+        int frames = 1;
+        ss >> frames;
+        g_steps.push_back(Step{.action = [=] { request_hud_log(frames); }});
     } else if (cmd == "aimtrace") {
         int frames = 30;
         ss >> frames;

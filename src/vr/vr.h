@@ -59,6 +59,11 @@ void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud
 // What present() sent this frame (0 left, 1 right, 2 screen; sim mode prepares them too), or null.
 ID3D11Texture2D* submitted(int which);
 
+// Diagnostics (OpenVR): the textures last handed to the panels (0 HUD, 1 screen), and
+// switching panels off live (`panels HUD SCREEN`, 1/0 each).
+ID3D11Texture2D* panel_texture(int which);
+void set_panels(bool hud, bool screen);
+
 // The size the game's 4:3 render targets should be created at, or false to leave them alone.
 bool eye_resolution(unsigned* width, unsigned* height);
 
