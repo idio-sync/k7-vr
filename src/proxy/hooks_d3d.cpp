@@ -301,6 +301,14 @@ static std::unordered_map<ID3D11Resource*, ID3D11Texture2D*> g_twins;  // game t
 static std::unordered_map<ID3D11View*, ID3D11View*> g_twin_views;     // game view -> same view of the twin
 
 static bool g_frame_3d;              // a perspective draw went into the scene target this frame
+// Menu screens over the 3D scene (the pause menu and its pages) are built from many untextured 2D
+// quads (panels, frames, the dim) among the textured artwork: 32 a frame, against 1-3 (fades,
+// letterbox bars) in gameplay and cutscenes. Split by the HUD rule, the artwork goes to the HUD
+// panel and the quads to the eyes, and the layering between them is lost, so such frames go to
+// the screen panel whole, as the game view draws them.
+constexpr int kMenuQuads = 12;
+static int g_menu_quads;             // untextured 2D quads drawn into the eyes after the scene this frame
+static bool g_menu_shown;            // the last frame went to the screen panel as a menu (logs changes)
 static ID3D11Texture2D* g_scene_tex; // the scene target of this frame's last perspective draw (diagnostics)
 static ID3D11Texture2D* g_final[2];  // each eye's final image (the texture the game blits to the window)
 static ID3D11Texture2D* g_hud_tex;
@@ -1740,6 +1748,7 @@ static void draw_stereo(DrawFn draw) {
         release_targets();
         return;
     }
+    if (scene && kind == 2 && g_frame_3d && !eye_image) ++g_menu_quads;  // (kMenuQuads)
     // In aim mode the first run of 3D draws after the clear whose models sit near the camera is
     // the first-person arm and gun (and the character's body behind the camera, which the grip
     // clip removes). Shaders differ: Dan's arm and revolver use two. The world starts far out.
@@ -2408,27 +2417,37 @@ static void end_frame(IDXGISwapChain* sc) {
     // 2D frames (no perspective draw: menus, FMVs, loading): black eyes, the mono image on a screen.
     if (vr::stereo()) {
         {  // how many presented frames had a 3D scene, and how many 2D ones came with no draws at all
-            static unsigned n3d, n2d, n2d_empty;
+            static unsigned n3d, nmenu, n2d, n2d_empty;
             static ULONGLONG t0 = GetTickCount64();
-            if (g_frame_3d) ++n3d;
+            if (g_frame_3d && g_menu_quads >= kMenuQuads) ++nmenu;
+            else if (g_frame_3d) ++n3d;
             else if (g_draws_last == 0) ++n2d_empty;
             else ++n2d;
             if (GetTickCount64() - t0 >= 5000) {
-                logf("frames: 3D %u, 2D %u, 2D without draws %u", n3d, n2d, n2d_empty);
-                n3d = n2d = n2d_empty = 0;
+                logf("frames: 3D %u, menu %u, 2D %u, 2D without draws %u", n3d, nmenu, n2d, n2d_empty);
+                n3d = nmenu = n2d = n2d_empty = 0;
                 t0 = GetTickCount64();
             }
         }
         ID3D11Texture2D* left = nullptr;
         ID3D11Texture2D* right = nullptr;
         ID3D11Texture2D* screen = nullptr;
-        if (g_frame_3d && g_final[0]) {
+        // Menu screens over the 3D scene (see kMenuQuads): the game view on the screen panel.
+        ID3D11Texture2D* menu =
+            g_menu_quads >= kMenuQuads && g_frame_3d && g_scene_tex ? gv_tex(g_scene_tex, false) : nullptr;
+        if (bool(menu) != g_menu_shown) {
+            g_menu_shown = menu != nullptr;
+            logf("stereo: menu screen %s", g_menu_shown ? "on" : "off");
+        }
+        if (menu) {
+            screen = menu;
+        } else if (g_frame_3d && g_final[0]) {
             left = g_final[0];
             right = g_final[1] ? g_final[1] : g_final[0];
         } else {
             screen = g_final[0];
         }
-        ID3D11Texture2D* hud = g_frame_3d ? g_hud_tex : nullptr;
+        ID3D11Texture2D* hud = g_frame_3d && !menu ? g_hud_tex : nullptr;
         vr::present(left, right, hud, screen);
         if (g_pair) {
             g_pair = false;
@@ -2439,7 +2458,7 @@ static void end_frame(IDXGISwapChain* sc) {
                 swprintf(name, 64, L"pair_%03u_R.png", g_pair_index);
                 save_texture(vr::submitted(1) ? vr::submitted(1) : right, path_in(name));
             }
-            if (g_scene_tex && left) {
+            if (g_scene_tex && (left || menu)) {
                 swprintf(name, 64, L"pair_%03u_scene_L.png", g_pair_index);
                 save_texture(g_scene_tex, path_in(name));
                 if (ID3D11Texture2D* t = twin_tex(g_scene_tex, false)) {
@@ -2469,10 +2488,11 @@ static void end_frame(IDXGISwapChain* sc) {
                 swprintf(name, 64, L"pair_%03u_screen.png", g_pair_index);
                 save_texture(vr::submitted(2) ? vr::submitted(2) : screen, path_in(name));
             }
-            logf("pair %u written (%s frame%s)", g_pair_index++, g_frame_3d ? "3D" : "2D",
+            logf("pair %u written (%s frame%s)", g_pair_index++, menu ? "menu" : g_frame_3d ? "3D" : "2D",
                  g_final[1] || !left ? "" : ", right eye had no twin");
         }
         g_frame_3d = false;
+        g_menu_quads = 0;
         g_final[0] = g_final[1] = nullptr;
         g_scene_tex = nullptr;
         if (g_hud_rtv) {
