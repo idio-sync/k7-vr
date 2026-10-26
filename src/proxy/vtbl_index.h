@@ -4,6 +4,7 @@
 namespace k7::vt {
 
 extern const int dev_CreateTexture2D;
+extern const int tex2d_GetDesc;
 extern const int dev_CreateVertexShader;
 extern const int dev_CreateGeometryShader;
 extern const int dev_CreatePixelShader;

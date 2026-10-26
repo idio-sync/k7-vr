@@ -11,6 +11,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         k7::install_compile_hook();
         k7::install_d3d_hooks();
         k7::install_input_hook();
+        k7::install_xinput_hook();
         k7::install_file_hooks();
         k7::install_vr_profile();
         k7::start_audio_mute();

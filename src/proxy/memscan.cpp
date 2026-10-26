@@ -192,6 +192,8 @@ static LONG CALLBACK watch_handler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+static bool g_watch_rw;  // break on reads too (R/W0 = 11)
+
 static DWORD WINAPI watch_arm_thread(void* param) {
     const uintptr_t addr = reinterpret_cast<uintptr_t>(param);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -206,8 +208,8 @@ static DWORD WINAPI watch_arm_thread(void* param) {
             c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
             if (GetThreadContext(t, &c)) {
                 c.Dr0 = addr;
-                // L0 enable, R/W0 = 01 (write), LEN0 = 11 (4 bytes); addr = 0 clears.
-                c.Dr7 = addr ? (c.Dr7 & ~0xF0003ull) | 1 | (1 << 16) | (3 << 18) : c.Dr7 & ~0xF0003ull;
+                // L0 enable, R/W0 = 01 (write) or 11 (read/write), LEN0 = 11 (4 bytes); addr = 0 clears.
+                c.Dr7 = addr ? (c.Dr7 & ~0xF0003ull) | 1 | ((g_watch_rw ? 3u : 1u) << 16) | (3 << 18) : c.Dr7 & ~0xF0003ull;
                 if (SetThreadContext(t, &c)) ++armed;
             }
             ResumeThread(t);
@@ -219,7 +221,8 @@ static DWORD WINAPI watch_arm_thread(void* param) {
     return 0;
 }
 
-void mem_watch(uintptr_t addr, int hits) {
+void mem_watch(uintptr_t addr, int hits, bool rw) {
+    g_watch_rw = rw;
     static PVOID handler = AddVectoredExceptionHandler(1, watch_handler);
     (void)handler;
     if (!g_exe_lo) {

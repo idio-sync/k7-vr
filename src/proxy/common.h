@@ -39,7 +39,7 @@ void mem_peekd(uintptr_t addr);
 void mem_pokef(uintptr_t addr, float value);
 void mem_pokehits(float value);
 void mem_scanpair(float a, float b, float tol, int window);
-void mem_watch(uintptr_t addr, int hits);
+void mem_watch(uintptr_t addr, int hits, bool rw = false);  // rw: reads too
 void mem_watchhit(size_t index, int hits);
 void mem_patch(uintptr_t addr, const std::vector<uint8_t>& bytes);
 void mem_dumpf(uintptr_t addr, int count, const std::string& tag);
@@ -76,11 +76,13 @@ bool pointer_install();
 bool pointer_active(float* plane_distance);  // the dot updated since the last call; its plane's distance (game units)
 void pointer_set(bool on, float x, float y);  // steer the dot (game camera eye space, units) from the next update
 void request_scan_point();  // `scanpoint`: scan memory for the next single-point draw's x,y
+void request_aim_trace(int frames);  // `aimtrace N`: log aim/camera yaws for N aim-mode frames
 void set_gun_param(const std::string& name, const float v[3]);  // `gun` command: scale/pivot/clip/converge/hudmask
 
 Requests control_poll();      // once per frame
 void set_capture_snaps(std::vector<unsigned> draws);  // next capture also saves the RT after these draws
 bool fake_pad_enabled();
+void install_xinput_hook();  // the game's XInputGetStateEx lookup gets the mod's pad (xinput.cpp)
 void pad_apply(_XINPUT_STATE* state);  // ORs scripted input into player 1's state
 
 // Scripted keyboard through raw input (hooks_input.cpp).

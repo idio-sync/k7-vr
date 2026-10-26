@@ -135,14 +135,9 @@ HANDLE WINAPI hk_CreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY_
 
 void install_vr_profile() {
     const std::wstring ini = path_in(L"k7vr.ini");
+    // The VR controllers now drive the game's own pad bindings (xinput.cpp), so the keyboard
+    // profile is opt-in ([probe] vr_profile=1).
     g_profile = GetPrivateProfileIntW(L"probe", L"vr_profile", 0, ini.c_str()) != 0;
-    if (!g_profile) {
-        wchar_t mode[32];
-        GetPrivateProfileStringW(L"vr", L"mode", L"off", mode, 32, ini.c_str());
-        const DWORD saves = GetFileAttributesW(path_in(L"SavedGames").c_str());
-        g_profile = _wcsicmp(mode, L"openvr") == 0 && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
-                    (saves == INVALID_FILE_ATTRIBUTES || !(saves & FILE_ATTRIBUTE_DIRECTORY));
-    }
     wchar_t source[MAX_PATH];
     GetPrivateProfileStringW(L"probe", L"vr_profile_source", L"", source, MAX_PATH, ini.c_str());
     if (source[0]) g_real = source;

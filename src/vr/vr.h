@@ -20,7 +20,13 @@
 
 #include "headmath.h"
 
+struct _XINPUT_GAMEPAD;
+
 namespace k7::vr {
+
+// The VR controllers as an XInput pad for the game's player 1 (input.cpp); false when no
+// controller is connected (OpenVR mode only).
+bool pad_state(_XINPUT_GAMEPAD* out);
 
 // Matches the K7Stereo constant buffer the vertex shader patch declares (slot b12).
 struct EyeConsts {
@@ -40,8 +46,9 @@ bool stereo();  // drawing two eyes (Sim or OpenVR)
 // game_xy_ratio = the game projection's y scale / x scale (its aspect), for sim and flat modes.
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]);
 
-// The game camera's own view: identity head and the game's own projection (with the inflated
-// FOV it believes in). Used for the game-view pass that feeds the game's CPU readbacks.
+// The game camera's own view: identity head and the game's intended projection (undoing FOV
+// inflation). Used for the game-view pass that feeds the game's frame copies (CPU readbacks and
+// screen effects).
 void game_view(float game_xy_ratio, EyeConsts* out);
 
 // Called once per frame after the game drew it. 3D frames: both eye images plus the HUD
@@ -63,6 +70,7 @@ void set_content_aspect(float aspect);
 // Sim mode: a scripted hand (set_sim_hand).
 bool hand_pose(Pose* out);
 void set_sim_hand(float yaw_deg, float pitch_deg);
+void set_hand_pitch(float degrees);  // [vr] hand_pitch, also live (`handpitch D`)
 // Rebuilds this frame's head transforms for a game camera at `cam_in_anchor` (metres; rotation
 // and offset from the anchor), so the world stays put while the game camera turns.
 void relock(const Pose& cam_in_anchor, EyeConsts eyes[2]);

@@ -14,6 +14,7 @@
 namespace k7::vt {
 
 const int dev_CreateTexture2D = SLOT(ID3D11Device, CreateTexture2D);
+const int tex2d_GetDesc = SLOT(ID3D11Texture2D, GetDesc);
 const int dev_CreateVertexShader = SLOT(ID3D11Device, CreateVertexShader);
 const int dev_CreateGeometryShader = SLOT(ID3D11Device, CreateGeometryShader);
 const int dev_CreatePixelShader = SLOT(ID3D11Device, CreatePixelShader);

@@ -48,14 +48,16 @@ Three hand directions, same spot:
 
 ## Controls
 
+The controllers act as the game's own gamepad (its [Pad] bindings, GameCube layout):
+
 | | right hand | left hand |
 |---|---|---|
-| trigger | fire | walk (hold) |
-| grip | aim mode (hold), then point the controller | scan (hold) |
-| A / X | accept | special |
-| B / Y | skip / decline | map |
-| stick | aim / menu arrows | up: walk, down: turn around, left/right: choose (menus, junctions) |
-| stick click | reload | game menu |
+| trigger | fire (pad A) | walk (pad A, hold) |
+| grip | aim mode (pad R2, hold), then point the controller | scan (pad L2) |
+| A / X | accept (pad A) | map (pad X) |
+| B / Y | decline / turn around (pad B) | special (pad Y) |
+| stick | right stick | left stick, and the D-pad for menus |
+| stick click | reload | game menu / skip (pad Start) |
 
 Both stick clicks held for a second recentre the view. On the silhouette screen that starts a
 target, just point the right controller at it.

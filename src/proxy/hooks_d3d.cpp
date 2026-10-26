@@ -4,6 +4,7 @@
 #include "common.h"
 
 #include <dxgi1_2.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <cmath>
@@ -163,6 +164,19 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
     UINT nvp = 1;
     c->RSGetViewports(&nvp, &vp);
     if (nvp) appendf(s, " vp=%g,%g,%gx%g", vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height);
+    ID3D11RasterizerState* rs = nullptr;
+    c->RSGetState(&rs);
+    if (rs) {
+        D3D11_RASTERIZER_DESC rd;
+        rs->GetDesc(&rd);
+        rs->Release();
+        if (rd.ScissorEnable) {
+            D3D11_RECT r;
+            UINT nr = 1;
+            c->RSGetScissorRects(&nr, &r);
+            if (nr) appendf(s, " scissor=%ld,%ld-%ld,%ld", r.left, r.top, r.right, r.bottom);
+        }
+    }
 
     D3D11_PRIMITIVE_TOPOLOGY topo;
     c->IAGetPrimitiveTopology(&topo);
@@ -271,6 +285,8 @@ static ID3D11Buffer* g_gv_cb;      // game-view pass (vr::game_view)
 static ID3D11Buffer* g_draw_cb[2];  // slot b13 per-draw transform: [0] none, [1] first-person arm and gun
 constexpr UINT kDrawSlot = 13;
 static bool g_aim_mode;             // the game's first-person aim camera is active this frame
+static D3D11_RECT g_letterbox;      // this frame's cutscene letterbox band (eye-target pixels)
+static bool g_letterbox_on;
 static int g_gun_run;               // 0 before the frame's first 3D draw, 1 inside the arm/gun run, 2 after
 static vr::EyeConsts g_eyes[2];    // this frame's eyes
 static bool g_pair;                // save both eyes at the end of this frame
@@ -313,6 +329,9 @@ static float g_aim_converge = 10;                     // metres
 static bool g_anchor_set;
 static vr::Pose g_anchor;                             // world pose (game units) of the player's frame
 static bool g_relocked;                               // this frame's head transforms follow its camera
+static int g_aim_trace;                               // `aimtrace N` frames left
+static bool g_prev_cam_valid;                         // last frame's camera is known (this aim session)
+static float g_aim_written_yaw;
 static float g_laser_muzzle = 0.15f;                  // the laser starts this far forward of the grip, metres
 static float g_laser_length = 30;                     // metres; [vr] laser_m, 0 = no laser
 static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden in aim mode (the reticle)
@@ -435,16 +454,40 @@ static void steer_aim() {
     float yaw, pitch;
     vr::aim_angles(d, &yaw, &pitch);
     aim_set(yaw, pitch);
+    g_aim_written_yaw = yaw;
 }
 
 // First 3D draw of an aim-mode frame: the game camera is final now. Rebuild both eyes against
 // it, and put the gun in the hand.
+// `aimtrace N`: for N aim-mode frames, log the yaw written, the aim controller's, the camera
+// manager's at the first 3D draw, and the one the world was drawn with (first world draw's
+// model-view rotation; level geometry has none of its own), to measure any camera lag.
+void request_aim_trace(int frames) { g_aim_trace = frames; }
+
+static float yaw_of(float fx, float fz) { return atan2f(fx, fz); }
+
 static void relock_aim() {
+    const bool first = !g_relocked;
     g_relocked = true;
     float eye[3], tgt[3];
     if (!g_anchor_set || !aim_camera(eye, tgt)) return;
+    if (first && g_aim_trace > 0) {
+        float aimctl[2] = {};
+        memcpy(aimctl, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + 0x46beac), 8);
+        logf("aimtrace frame %u: written %.3f aimctl %.3f manager %.3f", g_frame, g_aim_written_yaw, aimctl[1],
+             yaw_of(tgt[0] - eye[0], tgt[2] - eye[2]));
+    }
     const float u = vr::unit();
-    const vr::Pose cam = vr::compose(vr::inverse(g_anchor), vr::look_at(eye, tgt));  // game units
+    // The game draws each frame with the camera it reported one frame earlier (measured with
+    // aimtrace: the manager's camera at the first draw is the next frame's), so lock against that.
+    static vr::Pose drawn_cam, next_cam;
+    if (first) {
+        const vr::Pose now = vr::compose(vr::inverse(g_anchor), vr::look_at(eye, tgt));  // game units
+        drawn_cam = g_prev_cam_valid ? next_cam : now;
+        next_cam = now;
+        g_prev_cam_valid = true;
+    }
+    const vr::Pose cam = drawn_cam;
     vr::relock(vr::scaled(cam, u), g_eyes);
     for (int e = 0; e < 2; ++e) g_ctx->UpdateSubresource(g_eye_cb[e], 0, nullptr, &g_eyes[e], 0, 0);
 
@@ -696,6 +739,7 @@ static void set_eye_offsets() {
         if (g_anchor_set) g_anchor = vr::yaw_only(vr::look_at(eye, tgt));
         g_pivot_frames = g_pivot_still = 0;
         g_pivot_locked = false;
+        g_prev_cam_valid = false;
     } else if (aim) {
         ++g_pivot_frames;
     }
@@ -705,6 +749,7 @@ static void set_eye_offsets() {
     g_gun_run = 0;
     g_relocked = false;
     g_laser_ready = g_laser_done = false;
+    g_letterbox_on = false;
     if (g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
     const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
     vr::begin_frame(ratio, g_eyes);
@@ -1016,9 +1061,37 @@ static void note_final_source() {
 // ---- Eye-resolution render targets ----
 // In VR the game's 4:3 render and depth targets are created at the headset's eye resolution
 // (vr::eye_resolution); draws into them get the game's viewports and scissors scaled to match.
+// The game never learns: GetDesc called from the game's code reports the size it asked for, so
+// everything it derives from sizes (its frame readback buffers and the pixel reads its hit tests
+// make, copy regions, the window blit) stays as in the unmodded game at any eye resolution.
+// Copies between resized textures get their regions scaled; the game-view targets (what its
+// readbacks read) are the original size.
 
-static std::unordered_map<ID3D11Resource*, std::pair<float, float>> g_resized;  // texture -> (sx, sy)
+struct Resized {
+    float sx, sy;   // real / original
+    UINT ow, oh;    // the size the game asked for
+    UINT rw, rh;    // the real size
+};
+static std::unordered_map<ID3D11Resource*, Resized> g_resized;
 static UINT g_orig_w, g_orig_h;  // the size the game asked for (its 4:3 targets)
+static uintptr_t g_exe_lo, g_exe_hi;
+
+static const Resized* resized_info(ID3D11Resource* res) {
+    if (!res || g_resized.empty()) return nullptr;
+    auto it = g_resized.find(res);
+    return it == g_resized.end() ? nullptr : &it->second;
+}
+
+using Tex2DGetDesc_t = void(STDMETHODCALLTYPE*)(ID3D11Texture2D*, D3D11_TEXTURE2D_DESC*);
+static Tex2DGetDesc_t o_Tex2DGetDesc;
+
+static void STDMETHODCALLTYPE hk_Tex2DGetDesc(ID3D11Texture2D* tex, D3D11_TEXTURE2D_DESC* desc) {
+    o_Tex2DGetDesc(tex, desc);
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    if (caller < g_exe_lo || caller >= g_exe_hi) return;  // us, d3d11, the SteamVR compositor: the truth
+    if (const Resized* r = resized_info(tex))
+        if (desc->Width == r->rw && desc->Height == r->rh) desc->Width = r->ow, desc->Height = r->oh;
+}
 
 using CreateTexture2D_t = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*,
                                                       const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
@@ -1027,25 +1100,34 @@ static CreateTexture2D_t o_CreateTexture2D;
 static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11_TEXTURE2D_DESC* desc,
                                                     const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
     unsigned w = 0, h = 0;
-    // Not textures the CPU reads (the game's frame copies for its readbacks keep their size).
-    if (d == g_dev && desc && !init && (desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) &&
-        !desc->CPUAccessFlags && desc->Width * 3 == desc->Height * 4 && desc->Height >= 480 &&
-        vr::eye_resolution(&w, &h)) {
+    // Frame-sized (4:3) textures without initial data: render targets and the copies the game
+    // makes of them. Not textures the CPU reads (its readback staging keeps the original size)
+    // and not loaded artwork (which comes with data).
+    if (d == g_dev && desc && !init && !desc->CPUAccessFlags && desc->Usage == D3D11_USAGE_DEFAULT &&
+        desc->Width * 3 == desc->Height * 4 && desc->Height >= 480 && vr::eye_resolution(&w, &h)) {
         D3D11_TEXTURE2D_DESC nd = *desc;
         nd.Width = w;
         nd.Height = h;
         HRESULT hr = o_CreateTexture2D(d, &nd, init, out);
         if (SUCCEEDED(hr) && out && *out) {
-            g_resized[*out] = {float(w) / float(desc->Width), float(h) / float(desc->Height)};
+            g_resized[*out] = {float(w) / float(desc->Width), float(h) / float(desc->Height), desc->Width, desc->Height, w, h};
             g_orig_w = desc->Width;
             g_orig_h = desc->Height;
             vr::set_content_aspect(float(desc->Width) / float(desc->Height));
             logf("eye targets: %ux%u f%d created at %ux%u", desc->Width, desc->Height, desc->Format, w, h);
+            if (!o_Tex2DGetDesc) {  // all 2D textures share the vtable: hook once
+                patch_vtbl(*out, vt::tex2d_GetDesc, reinterpret_cast<void*>(&hk_Tex2DGetDesc),
+                           reinterpret_cast<void**>(&o_Tex2DGetDesc));
+                MODULEINFO mi{};
+                GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(nullptr), &mi, sizeof(mi));
+                g_exe_lo = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
+                g_exe_hi = g_exe_lo + mi.SizeOfImage;
+            }
         }
         return hr;
     }
-    // (The game makes its readback staging textures from the resized targets' descriptions and
-    // sizes its CPU reads from them, so those stay resized; the game-view targets match them.)
+    // A texture the game creates "like" a resized one (it sees the original size) is made at
+    // that size: its readback staging textures, copy destinations.
     return o_CreateTexture2D(d, desc, init, out);
 }
 
@@ -1068,14 +1150,28 @@ struct ViewportScale {
         if (nvp) g_ctx->RSSetViewports(nvp, svp);
         if (nsr) g_ctx->RSSetScissorRects(nsr, ssr);
     }
+    // A 3D draw over (nearly) the whole frame, in the eyes: the whole eye image. The game frames
+    // cutscenes with a shifted viewport and a letterbox scissor; in the headset that would cut
+    // the view and move it off the lens centre. (Small viewports, picture-in-picture views, stay.)
+    void fill_eye() const {
+        if (!active || !nvp || vp[0].Width < 0.9f * g_orig_w || vp[0].Height < 0.7f * g_orig_h) return;
+        // Remember the letterbox band: the bars the game draws over the rest are left out of the eyes.
+        if (nsr && (ssr[0].top > 0 || ssr[0].bottom < LONG(rh)) && ssr[0].right - ssr[0].left >= LONG(0.9f * rw))
+            g_letterbox = ssr[0], g_letterbox_on = true;
+        const D3D11_VIEWPORT full{0, 0, float(rw), float(rh), vp[0].MinDepth, vp[0].MaxDepth};
+        const D3D11_RECT all{0, 0, LONG(rw), LONG(rh)};
+        g_ctx->RSSetViewports(1, &full);
+        g_ctx->RSSetScissorRects(1, &all);
+    }
+    UINT rw = 0, rh = 0;  // the real size of the render target
     D3D11_VIEWPORT svp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];  // scaled
     D3D11_RECT ssr[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
 
     explicit ViewportScale(ID3D11Resource* rt) {
-        if (g_resized.empty() || !rt) return;
-        auto it = g_resized.find(rt);
-        if (it == g_resized.end()) return;
-        const float sx = it->second.first, sy = it->second.second;
+        const Resized* r = resized_info(rt);
+        if (!r) return;
+        const float sx = r->sx, sy = r->sy;
+        rw = r->rw, rh = r->rh;
         g_ctx->RSGetViewports(&nvp, vp);
         g_ctx->RSGetScissorRects(&nsr, sr);
         for (UINT i = 0; i < nvp; ++i)
@@ -1098,8 +1194,9 @@ struct ViewportScale {
 // The game reads its own frame back on the CPU (the port's emulation of GX "EFB peeks": hit
 // tests among others) from copies it makes of the scene colour and depth targets. In stereo
 // those targets hold eye images (head-tracked, headset projection, resized), so every scene draw
-// is also drawn from the game camera with its own projection and viewports at the original size
-// into game-view targets, and the game's copies out of the scene targets read from those.
+// is also drawn from the game camera with its own projection and viewports into game-view
+// targets of the original size, and the game's copies out of the scene targets into textures of
+// the original size (its readback staging, which it sizes from what GetDesc tells it) read from those.
 
 static std::unordered_map<ID3D11Resource*, ID3D11Texture2D*> g_gv_tex;  // scene texture -> game view
 static std::unordered_map<ID3D11View*, ID3D11View*> g_gv_views;
@@ -1111,8 +1208,9 @@ static ID3D11Texture2D* gv_tex(ID3D11Resource* res, bool create) {
     D3D11_RESOURCE_DIMENSION dim;
     res->GetType(&dim);
     if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return nullptr;
-    D3D11_TEXTURE2D_DESC d;  // same size as the (possibly resized) scene target, like the game's copies
+    D3D11_TEXTURE2D_DESC d;  // the size the game asked for, like its readback copies
     static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+    if (const Resized* r = resized_info(res)) d.Width = r->ow, d.Height = r->oh;
     d.MiscFlags &= ~UINT(D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
                          D3D11_RESOURCE_MISC_GDI_COMPATIBLE);
     ID3D11Texture2D* t = nullptr;
@@ -1158,12 +1256,13 @@ static void draw_game_view(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D
         if (rtv[i] && !(grtv[i] = gv_view(rtv[i], true))) return;
     ID3D11DepthStencilView* gdsv = dsv ? gv_view(dsv, true) : nullptr;
     if (dsv && !gdsv) return;
-    (void)scale;  // same size as the eye targets: the scaled viewports apply as they are
+    scale.unscale();  // original-size targets: the game's own viewports
     g_ctx->OMSetRenderTargets(kMaxTargets, grtv, gdsv);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_gv_cb);
     draw();
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
     g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+    scale.rescale();
 }
 
 static bool points_or_lines() {
@@ -1257,6 +1356,19 @@ static void draw_stereo(DrawFn draw) {
             gun = true;
             find_gun_pivot();
         } else {
+            if (g_gun_run == 1 && g_aim_trace > 0) {  // the first world draw: the camera it was drawn with
+                ID3D11Buffer* cb0 = nullptr;
+                g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+                if (cb0) {
+                    auto it = g_cb.find(cb0);
+                    cb0->Release();
+                    if (it != g_cb.end() && it->second.size() >= kTemplateCbMin) {
+                        const float* f = reinterpret_cast<const float*>(it->second.data());
+                        logf("aimtrace frame %u: drawn %.3f", g_frame, yaw_of(-f[8], -f[10]));
+                    }
+                }
+                --g_aim_trace;
+            }
             g_gun_run = 2;
         }
     }
@@ -1269,11 +1381,20 @@ static void draw_stereo(DrawFn draw) {
         return;
     }
 
+    if (kind == 1 && scene) scale.fill_eye();  // (the game view below keeps the game's framing)
+    // 2D in the eyes during a letterboxed cutscene: clipped to the band, so the bars stay out.
+    const bool clip_letterbox = kind == 2 && scene && g_letterbox_on;
+    auto eye_draw = [&](int eye) {
+        if (card)
+            draw_scissored(eye, draw);
+        else if (clip_letterbox)
+            draw_in_rects(&g_letterbox, 1, draw);
+        else
+            draw();
+    };
+
     // Left eye: as issued.
-    if (card)
-        draw_scissored(0, draw);
-    else
-        draw();
+    eye_draw(0);
 
     // Right eye: twins for targets, depth and any sampled texture an eye rendered.
     ID3D11RenderTargetView* trtv[kMaxTargets] = {};
@@ -1295,10 +1416,7 @@ static void draw_stereo(DrawFn draw) {
         g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
         if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, tsrv);
         g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[1]);
-        if (card)
-            draw_scissored(1, draw);
-        else
-            draw();
+        eye_draw(1);
         g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
         if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
         g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
@@ -1574,9 +1692,23 @@ static void STDMETHODCALLTYPE w_CopySubresourceRegion(ID3D11DeviceContext* c, ID
                  unsigned(uintptr_t(_ReturnAddress()) - uintptr_t(GetModuleHandleW(nullptr))));
         }
     }
-    if (ID3D11Texture2D* g = vr::stereo() && !g_resized.count(dst) ? gv_tex(src, false) : nullptr) {
+    const Resized* rs = resized_info(src);
+    const Resized* rd = resized_info(dst);
+    if (ID3D11Texture2D* g = vr::stereo() && rs && !rd ? gv_tex(src, false) : nullptr) {
         real_of(c)->CopySubresourceRegion(dst, dsub, x, y, z, g, ssub, box);  // the game's view, for readbacks
         return;
+    }
+    // The game's regions are in the sizes it believes in: scale them for resized textures.
+    D3D11_BOX scaled;
+    if (box && rs) {
+        scaled = {UINT(box->left * rs->sx + 0.5f), UINT(box->top * rs->sy + 0.5f), box->front,
+                  UINT(box->right * rs->sx + 0.5f), UINT(box->bottom * rs->sy + 0.5f), box->back};
+        box = &scaled;
+    }
+    if (rd) x = UINT(x * rd->sx + 0.5f), y = UINT(y * rd->sy + 0.5f);
+    if (rs && !rd || !rs && rd) {
+        static int logged;
+        if (logged++ < 5) logf("copy between a resized and an original-size texture (no game view): approximate");
     }
     real_of(c)->CopySubresourceRegion(dst, dsub, x, y, z, src, ssub, box);
     mirror_copy(dst, dsub, x, y, z, src, ssub, box, false);
@@ -1589,8 +1721,20 @@ static void STDMETHODCALLTYPE w_CopyResource(ID3D11DeviceContext* c, ID3D11Resou
         describe_resource(g_cap.text, "dst", dst);
         g_cap.text += '\n';
     }
-    if (ID3D11Texture2D* g = vr::stereo() && !g_resized.count(dst) ? gv_tex(src, false) : nullptr) {
+    const Resized* rs = resized_info(src);
+    const Resized* rd = resized_info(dst);
+    if (ID3D11Texture2D* g = vr::stereo() && rs && !rd ? gv_tex(src, false) : nullptr) {
         real_of(c)->CopyResource(dst, g);  // the game's view, for readbacks
+        return;
+    }
+    if (!rs != !rd) {
+        static int logged;
+        if (logged++ < 8) {
+            std::string s;
+            describe_resource(s, "src", src);
+            describe_resource(s, "dst", dst);
+            logf("CopyResource between a resized and an original-size texture: skipped%s", s.c_str());
+        }
         return;
     }
     real_of(c)->CopyResource(dst, src);

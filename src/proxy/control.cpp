@@ -17,6 +17,7 @@
 //   press A[+B...] [ms]     tap pad buttons (default 120 ms), then release for 120 ms
 //   hold A[+B...] ms        hold pad buttons
 //   stick lx ly ms          left stick, -1..1
+//   pad A[+B..]|- lx ly [rt] ms   pad buttons, left stick (and right trigger 0..1) together
 //   rstick rx ry ms         right stick, -1..1
 //   trig l r ms             triggers, 0..1
 //   wait ms                 idle
@@ -160,6 +161,10 @@ static void run_line(const std::string& line) {
         float v[3] = {};
         ss >> name >> v[0] >> v[1] >> v[2];
         g_steps.push_back(Step{.action = [=] { set_gun_param(name, v); }});
+    } else if (cmd == "handpitch") {
+        float deg = 0;
+        ss >> deg;
+        g_steps.push_back(Step{.action = [=] { vr::set_hand_pitch(deg); }});
     } else if (cmd == "hand") {
         float yaw = 0, pitch = 0;
         ss >> yaw >> pitch;
@@ -198,6 +203,18 @@ static void run_line(const std::string& line) {
         s.ms = ms;
         g_steps.push_back(s);
         if (cmd == "press") g_steps.push_back(Step{.ms = 120});
+    } else if (cmd == "pad") {  // pad BUTTONS|- LX LY [RT] ms: buttons, left stick (and right trigger) together
+        std::string buttons;
+        double x = 0, y = 0, rt = 0;
+        DWORD ms = 0;
+        ss >> buttons >> x >> y >> rt >> ms;
+        if (!ms) ms = DWORD(rt), rt = 0;  // RT is optional
+        Step s;
+        if (buttons != "-") s.buttons = parse_buttons(buttons);
+        s.lx = axis(x), s.ly = axis(y);
+        s.rt = BYTE(rt * 255);
+        s.ms = ms;
+        g_steps.push_back(s);
     } else if (cmd == "stick" || cmd == "rstick") {
         double x = 0, y = 0;
         DWORD ms = 0;
@@ -279,6 +296,10 @@ static void run_line(const std::string& line) {
         float deg = 0;
         ss >> deg;
         g_steps.push_back(Step{.action = [=] { set_fov_inflate(deg); }});
+    } else if (cmd == "aimtrace") {
+        int frames = 30;
+        ss >> frames;
+        g_steps.push_back(Step{.action = [=] { request_aim_trace(frames); }});
     } else if (cmd == "scanpoint") {
         g_steps.push_back(Step{.action = [] { request_scan_point(); }});
     } else if (cmd == "scanproj") {
@@ -288,12 +309,13 @@ static void run_line(const std::string& line) {
         int window = 64;
         ss >> a >> b >> tol >> window;
         g_steps.push_back(Step{.action = [=] { mem_scanpair(a, b, tol, window); }});
-    } else if (cmd == "watch") {
+    } else if (cmd == "watch" || cmd == "watchrw") {
         std::string addr;
         int hits = 8;
         ss >> addr >> hits;
         uintptr_t a = parse_addr(addr);
-        g_steps.push_back(Step{.action = [=] { mem_watch(a, hits); }});
+        const bool rw = cmd == "watchrw";
+        g_steps.push_back(Step{.action = [=] { mem_watch(a, hits, rw); }});
     } else if (cmd == "peekf" || cmd == "pokef" || cmd == "pokehits") {
         std::string addr;
         float v = 0;

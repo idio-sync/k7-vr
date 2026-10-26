@@ -26,6 +26,7 @@ static Pose g_eye_to_head[2] = {identity(), identity()};
 static Pose g_hand = identity();          // right controller relative to the reference (hand_pitch/offset applied)
 static bool g_hand_valid;
 static Pose g_hand_adjust = identity();   // [vr] hand_pitch, hand_offset
+static float g_hand_offset[3];
 static float g_sim_hand_yaw, g_sim_hand_pitch;
 
 static ID3D11Device* g_dev;
@@ -90,12 +91,10 @@ void init(ID3D11Device* device, ID3D11DeviceContext* context) {
     g_inflate = ini_float(L"fov_inflate", g_inflate);
     g_destripe = ini_float(L"destripe", 1) != 0;
     {
-        float off[3] = {};
         wchar_t buf[64];
         GetPrivateProfileStringW(L"vr", L"hand_offset", L"", buf, 64, path_in(L"k7vr.ini").c_str());
-        if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &off[0], &off[1], &off[2]);
-        g_hand_adjust = compose(translation(off[0], off[1], off[2]),
-                                rotation_yaw_pitch(0, ini_float(L"hand_pitch", 0) * 3.14159265f / 180));
+        if (buf[0]) swscanf_s(buf, L"%f,%f,%f", &g_hand_offset[0], &g_hand_offset[1], &g_hand_offset[2]);
+        set_hand_pitch(ini_float(L"hand_pitch", 0));
     }
     wchar_t m[32];
     GetPrivateProfileStringW(L"vr", L"mode", L"off", m, 32, path_in(L"k7vr.ini").c_str());
@@ -154,6 +153,12 @@ bool hand_pose(Pose* out) {
     return g_hand_valid;
 }
 
+void set_hand_pitch(float degrees) {
+    g_hand_adjust = compose(translation(g_hand_offset[0], g_hand_offset[1], g_hand_offset[2]),
+                            rotation_yaw_pitch(0, degrees * 3.14159265f / 180));
+    logf("vr: hand pitch %g degrees", degrees);
+}
+
 void set_sim_hand(float yaw_deg, float pitch_deg) { g_sim_hand_yaw = yaw_deg, g_sim_hand_pitch = pitch_deg; }
 
 void relock(const Pose& cam_in_anchor, EyeConsts eyes[2]) {
@@ -172,11 +177,45 @@ static void symmetric_rows(float tan_y, float game_xy_ratio, EyeConsts& e) {
 }
 
 void game_view(float game_xy_ratio, EyeConsts* out) {
-    (void)game_xy_ratio;
+    if (game_xy_ratio <= 0) game_xy_ratio = 1.18f;
     memset(out, 0, sizeof(EyeConsts));
     eye_space_transform(identity(), g_unit, out->head);
-    // The game's own projection, inflated FOV included: what it reads back must match what its
-    // CPU side projects (e.g. the laser-pointer dot's screen position for the hit test).
+    // If the game culls with an inflated FOV, project with the one it meant: its frame copies
+    // also feed screen effects (cutscene tints, the junction backdrop), which must keep their
+    // framing. (Laser-pointer screens suspend inflation, so their hit test sees the real view.)
+    const float intended = fov_inflate_intended();
+    if (intended > 0) {
+        symmetric_rows(tanf(intended * 3.14159265f / 360), game_xy_ratio, *out);
+        out->flags[0] = 1;
+    }
+}
+
+// The controller's pointing pose relative to its raw pose: the "tip" component of its render
+// model (where SteamVR's own laser pointers come from), so the aim follows the way the
+// controller is held. Identity if the model has no tip; [vr] hand_pitch then corrects by hand.
+static Pose controller_tip(::vr::TrackedDeviceIndex_t device) {
+    static ::vr::TrackedDeviceIndex_t cached_device = ::vr::k_unTrackedDeviceIndexInvalid;
+    static Pose tip = identity();
+    if (device == cached_device) return tip;
+    cached_device = device;
+    tip = identity();
+    char model[256] = {};
+    g_system->GetStringTrackedDeviceProperty(device, ::vr::Prop_RenderModelName_String, model, sizeof(model));
+    ::vr::IVRRenderModels* models = ::vr::VRRenderModels();
+    ::vr::VRControllerState_t state{};
+    ::vr::RenderModel_ControllerMode_State_t mode{};
+    ::vr::RenderModel_ComponentState_t comp{};
+    if (models && model[0] &&
+        models->GetComponentState(model, ::vr::k_pch_Controller_Component_Tip, &state, &mode, &comp)) {
+        tip = from_openvr(comp.mTrackingToComponentLocal);
+        // How far the tip's forward (-z) is tilted from the raw pose's, for the log.
+        const float pitch = asinf(-tip.m[1][2] > 1 ? 1 : (-tip.m[1][2] < -1 ? -1 : -tip.m[1][2])) * 180 / 3.14159265f;
+        logf("vr: right controller model '%s': tip at %.3f,%.3f,%.3f m, pointing %.1f degrees %s the raw axis", model,
+             tip.m[0][3], tip.m[1][3], tip.m[2][3], fabsf(pitch), pitch >= 0 ? "above" : "below");
+    } else {
+        logf("vr: right controller model '%s' has no tip component; aiming along its raw axis (hand_pitch)", model);
+    }
+    return tip;
 }
 
 void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
@@ -203,7 +242,7 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
         const ::vr::TrackedDeviceIndex_t right =
             g_system->GetTrackedDeviceIndexForControllerRole(::vr::TrackedControllerRole_RightHand);
         if (right < ::vr::k_unMaxTrackedDeviceCount && poses[right].bPoseIsValid) {
-            hand = from_openvr(poses[right].mDeviceToAbsoluteTracking);
+            hand = compose(from_openvr(poses[right].mDeviceToAbsoluteTracking), controller_tip(right));
             g_hand_valid = true;
         }
         for (int eye = 0; eye < 2; ++eye) {
