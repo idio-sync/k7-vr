@@ -336,6 +336,7 @@ static float g_laser_muzzle = 0.15f;                  // the laser starts this f
 static float g_laser_length = 30;                     // metres; [vr] laser_m, 0 = no laser
 static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden in aim mode (the reticle)
 static bool g_laser_depth = true;                     // walls hide the laser (`gun laserdepth 0`: debugging)
+static bool g_steer = true;                           // the hand steers the game's aim / pointer (`gun steer 0`)
 static bool g_laser_ready;                            // g_laser_pose is this frame's
 static vr::Pose g_laser_pose;                         // the hand in the game camera's eye space (game units)
 static float g_laser_from, g_laser_to;                // this frame's beam, metres along the hand's ray
@@ -397,6 +398,7 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "hudmask") g_aim_hud_mask = v[0];
     else if (name == "laser") g_laser_length = v[0];
     else if (name == "laserdepth") g_laser_depth = v[0] != 0;
+    else if (name == "steer") g_steer = v[0] != 0;  // 0: the hand doesn't steer the game's aim (testing)
     else logf("gun: unknown setting '%s'", name.c_str());
     logf("gun: scale %g pivot %g,%g,%g clip %g converge %g hud mask %g", g_gun_scale, g_gun_pivot[0], g_gun_pivot[1],
          g_gun_pivot[2], g_gun_clip, g_aim_converge, g_aim_hud_mask);
@@ -445,7 +447,7 @@ static void find_gun_pivot() {
 // Frame start, aim mode: point the game's aim where the hand points.
 static void steer_aim() {
     vr::Pose hand;
-    if (!g_anchor_set || !vr::hand_pose(&hand)) return;
+    if (!g_steer || !g_anchor_set || !vr::hand_pose(&hand)) return;
     // Target point in the anchor frame (metres), then its direction from the aim eye in the world.
     const float c = g_aim_converge;
     const float p[3] = {hand.m[0][3] - c * hand.m[0][2], hand.m[1][3] - c * hand.m[1][2], hand.m[2][3] - c * hand.m[2][2]};
