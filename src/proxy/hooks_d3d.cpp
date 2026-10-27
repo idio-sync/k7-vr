@@ -303,10 +303,11 @@ static std::unordered_map<ID3D11View*, ID3D11View*> g_twin_views;     // game vi
 static bool g_frame_3d;              // a perspective draw went into the scene target this frame
 // Menu screens over the 3D scene (the pause menu and its pages) are built from many untextured 2D
 // quads (panels, frames, the dim) among the textured artwork: 32 a frame, against 1-3 (fades,
-// letterbox bars) in gameplay and cutscenes. Split by the HUD rule, the artwork goes to the HUD
-// panel and the quads to the eyes, and the layering between them is lost, so such frames go to
-// the screen panel whole, as the game view draws them.
-constexpr int kMenuQuads = 12;
+// letterbox bars) in gameplay and cutscenes and up to 14 with LT held (the eye icon's view).
+// Split by the HUD rule, the artwork goes to the HUD panel and the quads to the eyes, and the
+// layering between them is lost, so such frames go to the screen panel whole, as the game view
+// draws them.
+constexpr int kMenuQuads = 24;
 static int g_menu_quads;             // untextured 2D quads drawn into the eyes after the scene this frame
 static bool g_menu_shown;            // the last frame went to the screen panel as a menu (logs changes)
 static ID3D11Texture2D* g_scene_tex; // the scene target of this frame's last perspective draw (diagnostics)
@@ -1571,13 +1572,31 @@ using CreateTexture2D_t = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11
                                                       const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
 static CreateTexture2D_t o_CreateTexture2D;
 
+// Whether a call comes from this DLL (the VR hand-off's copies, twins, the HUD target).
+static bool called_from_self(uintptr_t caller) {
+    static uintptr_t lo, hi;
+    if (!lo) {
+        HMODULE m = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&called_from_self), &m);
+        MODULEINFO mi{};
+        GetModuleInformation(GetCurrentProcess(), m, &mi, sizeof(mi));
+        lo = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
+        hi = lo + mi.SizeOfImage;
+    }
+    return caller >= lo && caller < hi;
+}
+
 static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11_TEXTURE2D_DESC* desc,
                                                     const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
     unsigned w = 0, h = 0;
     // Frame-sized (4:3) textures without initial data: render targets and the copies the game
     // makes of them. Not textures the CPU reads (its readback staging keeps the original size)
-    // and not loaded artwork (which comes with data).
+    // and not loaded artwork (which comes with data). Ours are made as asked: a copy of the
+    // original-size game view (a menu screen's hand-off) resized here no longer matched it, and
+    // was made again every frame.
     if (d == g_dev && desc && !init && !desc->CPUAccessFlags && desc->Usage == D3D11_USAGE_DEFAULT &&
+        !called_from_self(reinterpret_cast<uintptr_t>(_ReturnAddress())) &&
         desc->Width * 3 == desc->Height * 4 && desc->Height >= 480 && vr::eye_resolution(&w, &h)) {
         D3D11_TEXTURE2D_DESC nd = *desc;
         nd.Width = w;
@@ -1762,7 +1781,7 @@ static void draw_game_view(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D
     scale.rescale();
 }
 
-static void log_hud_draw() {
+static void log_hud_draw(const char* what = "hud") {
     ID3D11PixelShader* ps = nullptr;
     g_ctx->PSGetShader(&ps, nullptr, nullptr);
     uint32_t slots = 0xFFFFFFFF;
@@ -1773,7 +1792,11 @@ static void log_hud_draw() {
     D3D11_PRIMITIVE_TOPOLOGY topo;
     g_ctx->IAGetPrimitiveTopology(&topo);
     std::string s;
-    appendf(s, "hudlog frame %u: ps=%016llx topo=%d slots=0x%x", g_frame, shader_hash(ps), int(topo), slots);
+    appendf(s, "hudlog frame %u %s: ps=%016llx topo=%d slots=0x%x", g_frame, what, shader_hash(ps), int(topo), slots);
+    D3D11_VIEWPORT vp;
+    UINT nvp = 1;
+    g_ctx->RSGetViewports(&nvp, &vp);
+    if (nvp) appendf(s, " vp=%.0f,%.0f %.0fx%.0f", vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height);
     if (ps) ps->Release();
     ID3D11ShaderResourceView* srv[kMaxTextures] = {};
     g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
@@ -1878,7 +1901,10 @@ static void draw_stereo(DrawFn draw) {
         release_targets();
         return;
     }
-    if (scene && kind == 2 && g_frame_3d && !eye_image) ++g_menu_quads;  // (kMenuQuads)
+    if (scene && kind == 2 && g_frame_3d && !eye_image) {
+        ++g_menu_quads;  // (kMenuQuads)
+        if (g_hud_log > 0) log_hud_draw("menu quad");
+    }
     // In aim mode the first run of 3D draws after the clear whose models sit near the camera is
     // the first-person arm and gun (and the character's body behind the camera, which the grip
     // clip removes). Shaders differ: Dan's arm and revolver use two. The world starts far out.
@@ -2554,14 +2580,18 @@ static void end_frame(IDXGISwapChain* sc) {
     if (vr::stereo()) {
         {  // how many presented frames had a 3D scene, and how many 2D ones came with no draws at all
             static unsigned n3d, nmenu, n2d, n2d_empty;
+            static int most_quads;  // the most untextured 2D quads a 3D frame drew (see kMenuQuads)
             static ULONGLONG t0 = GetTickCount64();
+            if (g_frame_3d && g_menu_quads > most_quads) most_quads = g_menu_quads;
             if (g_frame_3d && g_menu_quads >= kMenuQuads) ++nmenu;
             else if (g_frame_3d) ++n3d;
             else if (g_draws_last == 0) ++n2d_empty;
             else ++n2d;
             if (GetTickCount64() - t0 >= 5000) {
-                logf("frames: 3D %u, menu %u, 2D %u, 2D without draws %u", n3d, nmenu, n2d, n2d_empty);
+                logf("frames: 3D %u, menu %u, 2D %u, 2D without draws %u; most 2D quads %d", n3d, nmenu, n2d,
+                     n2d_empty, most_quads);
                 n3d = nmenu = n2d = n2d_empty = 0;
+                most_quads = 0;
                 t0 = GetTickCount64();
             }
         }
@@ -2573,7 +2603,7 @@ static void end_frame(IDXGISwapChain* sc) {
             g_menu_quads >= kMenuQuads && g_frame_3d && g_scene_tex ? gv_tex(g_scene_tex, false) : nullptr;
         if (bool(menu) != g_menu_shown) {
             g_menu_shown = menu != nullptr;
-            logf("stereo: menu screen %s", g_menu_shown ? "on" : "off");
+            logf("stereo: menu screen %s (%d 2D quads)", g_menu_shown ? "on" : "off", g_menu_quads);
         }
         if (menu) {
             screen = menu;
