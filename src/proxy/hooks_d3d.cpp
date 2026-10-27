@@ -334,6 +334,18 @@ static float g_gun_scale = 0.6f;
 // moves the gun. [vr] gun_pivot (or `gun pivot`) sets it by hand instead.
 static float g_gun_pivot[3] = {0.45f, -0.9f, -2.5f};
 static bool g_gun_pivot_manual;
+// The gun's own axes in the game's aim view ([row][col]; columns are the model's x, y and z, and
+// +z is the barrel), from the grip draw's model-view. The game angles each gun in towards its
+// screen centre, where its shots go (Dan's revolver ~10 degrees left and 4 down, rolled ~20;
+// Garcian's pistol ~2 left). Moved into the hand as it is, the barrel would point that far off
+// the controller's pointing axis, which the shot follows; so the gun is turned straight in the
+// hand: barrel along the pointing axis, model up = controller up ([vr] gun_align=0: as the game
+// holds it, and the shot follows its barrel instead).
+static float g_gun_axes[3][3] = {{-1, 0, 0}, {0, 1, 0}, {0, 0, -1}};  // straight already
+static bool g_gun_align = true;
+static float g_gun_fix[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};   // aim view -> straightened gun
+static vr::Pose g_barrel = vr::identity();                         // the barrel's pose in the hand's frame
+static void update_gun_fix();
 static int g_pivot_frames;                            // aim-mode frames so far this session
 static bool g_pivot_seen;                             // found in this frame's arm/gun draws
 static int g_pivot_still;                             // frames the grip has held still
@@ -354,6 +366,7 @@ static bool g_prev_cam_valid;                         // last frame's camera is 
 static float g_aim_written_yaw;
 static float g_laser_muzzle = 0.15f;                  // the laser starts this far forward of the grip, metres
 static float g_laser_length = 30;                     // metres; [vr] laser_m, 0 = no laser
+static bool g_aim_laser;                              // a laser from the gun in aim mode ([vr] aim_laser=1; off: the game has none)
 static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden in aim mode (the reticle)
 static bool g_laser_depth = true;                     // walls hide the laser (`gun laserdepth 0`: debugging)
 static bool g_steer = true;                           // the hand steers the game's aim / pointer (`gun steer 0`)
@@ -391,6 +404,9 @@ static void init_draw_buffers() {
     g_texgen_ref = GetPrivateProfileIntW(L"vr", L"texgen_ref", 1, ini.c_str()) != 0;
     GetPrivateProfileStringW(L"vr", L"laser_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_laser_length = float(_wtof(buf));
+    g_aim_laser = GetPrivateProfileIntW(L"vr", L"aim_laser", 0, ini.c_str()) != 0;
+    g_gun_align = GetPrivateProfileIntW(L"vr", L"gun_align", 1, ini.c_str()) != 0;
+    update_gun_fix();
     GetPrivateProfileStringW(L"vr", L"aim_hud_mask", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_hud_mask = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"no_laser_guns", L"1269", buf, 64, ini.c_str());
@@ -423,7 +439,8 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "clip") g_gun_clip = v[0];
     else if (name == "converge") g_aim_converge = v[0];
     else if (name == "hudmask") g_aim_hud_mask = v[0];
-    else if (name == "laser") g_laser_length = v[0];
+    else if (name == "laser") g_laser_length = v[0], g_aim_laser = v[0] > 0;
+    else if (name == "align") g_gun_align = v[0] != 0, update_gun_fix();  // 0: the gun as the game holds it
     else if (name == "laserdepth") g_laser_depth = v[0] != 0;
     else if (name == "steer") g_steer = v[0] != 0;  // 0: the hand doesn't steer the game's aim (testing)
     else if (name == "camdraw") g_cam_from_draw = v[0] != 0;  // 0: assume the one-frame camera lag (as before)
@@ -455,22 +472,72 @@ static bool model_translation(float t[3]) {
     return true;
 }
 
+// The bound draw's model axes in eye space (the columns of position matrix 0's rotation).
+static bool model_axes(float g[3][3]) {
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return false;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (it == g_cb.end() || it->second.size() < kTemplateCbMin) return false;
+    const float* f = reinterpret_cast<const float*>(it->second.data());
+    for (int c = 0; c < 3; ++c) {
+        const float len = sqrtf(f[c] * f[c] + f[4 + c] * f[4 + c] + f[8 + c] * f[8 + c]);
+        if (len < 1e-6f) return false;
+        for (int r = 0; r < 3; ++r) g[r][c] = f[r * 4 + c] / len;
+    }
+    return true;
+}
+
+// g_gun_fix and g_barrel from g_gun_axes and g_gun_align.
+static void update_gun_fix() {
+    // Straight = the model's x, y, z along the hand's -x, y, -z: fix = straight * axes^T.
+    static const float kStraight[3] = {-1, 1, -1};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) g_gun_fix[i][j] = g_gun_align ? kStraight[i] * g_gun_axes[j][i] : float(i == j);
+    // The barrel (model +z) after the fix, in the hand's frame; the aim follows it.
+    float b[3];
+    for (int i = 0; i < 3; ++i)
+        b[i] = g_gun_fix[i][0] * g_gun_axes[0][2] + g_gun_fix[i][1] * g_gun_axes[1][2] + g_gun_fix[i][2] * g_gun_axes[2][2];
+    const float z[3] = {-b[0], -b[1], -b[2]};  // the pose's +z: the barrel points along its -z
+    float x[3] = {z[2], 0, -z[0]};             // (0,1,0) x z
+    const float xl = sqrtf(x[0] * x[0] + x[2] * x[2]);
+    if (xl < 1e-6f) x[0] = 1, x[2] = 0;
+    else x[0] /= xl, x[2] /= xl;
+    const float y[3] = {z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]};
+    g_barrel = vr::identity();
+    for (int i = 0; i < 3; ++i) g_barrel.m[i][0] = x[i], g_barrel.m[i][1] = y[i], g_barrel.m[i][2] = z[i];
+}
+
 static void find_gun_pivot() {
     if (g_pivot_seen || g_pivot_locked) return;
     float t[3];
     if (!model_translation(t) || !(t[2] < -1 && t[2] > -8)) return;
     g_pivot_seen = true;
     g_grip_mesh = g_draw_count;
-    if (g_gun_pivot_manual) return;
+    float axes[3][3];
+    bool turned = false;
+    if (model_axes(axes)) {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) turned = turned || fabsf(axes[r][c] - g_gun_axes[r][c]) > 1e-4f;
+        if (turned) memcpy(g_gun_axes, axes, sizeof(axes)), update_gun_fix();
+    }
+    if (g_gun_pivot_manual) {
+        if (turned) relock_aim();
+        return;
+    }
     // The arm is still being raised in the first frames: follow it until it holds still.
     const float moved = fabsf(t[0] - g_gun_pivot[0]) + fabsf(t[1] - g_gun_pivot[1]) + fabsf(t[2] - g_gun_pivot[2]);
     g_pivot_still = moved < 0.01f ? g_pivot_still + 1 : 0;
     if (g_pivot_still >= 10 || g_pivot_frames > 120) {
         g_pivot_locked = true;
-        logf("aim: gun grip at %.2f,%.2f,%.2f (gun mesh %u vertices%s)", t[0], t[1], t[2], g_grip_mesh,
-             gun_has_laser() ? "" : ", no laser");
+        const float r2d = 180 / 3.14159265f;
+        logf("aim: gun grip at %.2f,%.2f,%.2f (gun mesh %u vertices), barrel %.1f deg %s %.1f deg %s of the game "
+             "camera's axis, %s", t[0], t[1], t[2], g_grip_mesh, fabsf(asinf(g_gun_axes[0][2])) * r2d,
+             g_gun_axes[0][2] < 0 ? "left" : "right", fabsf(asinf(g_gun_axes[1][2])) * r2d,
+             g_gun_axes[1][2] < 0 ? "down" : "up", g_gun_align ? "turned straight in the hand" : "held as the game holds it");
     }
-    if (moved < 1e-4f) return;
+    if (moved < 1e-4f && !turned) return;
     memcpy(g_gun_pivot, t, sizeof(t));
     relock_aim();  // same camera and hand, new grip
 }
@@ -481,6 +548,7 @@ static bool aim_hit_distance(float* metres);
 static void steer_aim() {
     vr::Pose hand;
     if (!g_steer || !g_anchor_set || !vr::hand_pose(&hand)) return;
+    hand = vr::compose(hand, g_barrel);  // the ray: along the gun's barrel (the pointing axis once straightened)
     // The game fires from its aim eye, the hand's ray starts at the controller: they meet at the
     // target point, so it is where the ray hits the scene when that is known.
     float c = g_aim_converge;
@@ -533,17 +601,21 @@ static void apply_aim_cam(const vr::Pose& cam) {
 
     vr::Pose hand;
     if (!g_draw_cb[1] || !vr::hand_pose(&hand)) return;
-    // Game aim view -> anchor: the grip goes to the hand, scaled by gun_scale around the grip.
+    // Game aim view -> anchor: the grip goes to the hand, turned straight (g_gun_fix) and scaled
+    // by gun_scale around the grip.
     const vr::Pose q = vr::compose(vr::inverse(cam), vr::scaled(hand, 1 / u));
-    g_laser_pose = q;
+    g_laser_pose = vr::compose(q, g_barrel);  // the aim ray, in the game camera's eye space
     g_aim_ray_ready = true;
-    g_laser_ready = g_laser_length > 0 && gun_has_laser();
+    g_laser_ready = g_aim_laser && g_laser_length > 0 && gun_has_laser();
     g_laser_from = g_laser_muzzle, g_laser_to = g_laser_length;
     const float s = g_gun_scale;
+    float qf[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) qf[i][j] = q.m[i][0] * g_gun_fix[0][j] + q.m[i][1] * g_gun_fix[1][j] + q.m[i][2] * g_gun_fix[2][j];
     float m[16] = {};
     for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) m[i * 4 + j] = q.m[i][j] * s;
-        m[i * 4 + 3] = q.m[i][3] - s * (q.m[i][0] * g_gun_pivot[0] + q.m[i][1] * g_gun_pivot[1] + q.m[i][2] * g_gun_pivot[2]);
+        for (int j = 0; j < 3; ++j) m[i * 4 + j] = qf[i][j] * s;
+        m[i * 4 + 3] = q.m[i][3] - s * (qf[i][0] * g_gun_pivot[0] + qf[i][1] * g_gun_pivot[1] + qf[i][2] * g_gun_pivot[2]);
     }
     m[12] = 1;
     m[13] = g_gun_pivot[2] + g_gun_clip;

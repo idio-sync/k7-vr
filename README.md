@@ -77,11 +77,13 @@ Under `[vr]` in `k7vr\k7vr.ini` (all are listed at the top of `src\vr\vr.h`):
 | `gun_scale` | 0.6 | gun and hand size |
 | `gun_clip` | 2 | how much forearm and sleeve shows behind the hand (game units) |
 | `gun_pivot` | auto | the gun's grip in the game's aim view; found per character when aiming starts |
-| `no_laser_guns` | 1269 | gun meshes (vertex counts, logged when aiming starts) that get no laser; 1269 = Dan's revolver |
+| `gun_align` | 1 | turn the gun straight in the hand, so its barrel points where the shot goes (the game angles each gun in towards its screen centre: Dan's ~10°); 0 = held as the game holds it, the shot still following the barrel |
+| `aim_laser` | 0 | a laser from the gun in aim mode (the game has none) |
+| `no_laser_guns` | 1269 | with `aim_laser=1`: gun meshes (vertex counts, logged when aiming starts) that get no laser |
 | `aim_depth` | 1 | aim where the controller's ray meets the scene, so shots land where you point at any range (0 = at `aim_converge_m`) |
 | `aim_ignore_m` | 1.2 | surfaces nearer your eye than this don't count as the ray's hit (your gun and hand) |
 | `aim_converge_m` | 10 | distance along the ray aimed at when the hit isn't known (ray out of view, `aim_depth=0`) |
-| `laser_m` | 30 | laser length (0 = no laser) |
+| `laser_m` | 30 | laser length (the silhouette screen's pointer; aim mode with `aim_laser=1`) |
 | `aim_hud_mask` | 0.6 | width of the HUD's centre band hidden in aim mode (the game's crosshair) |
 | `aim_pitch_limit` | 80 | the game's aim pitch limit, degrees (the game allows 36) |
 | `texgen_ref` | 1 | in aim mode, the game's screen-space colour gradients stay as they were when aiming began instead of shifting as the hand turns the game camera (0 = the game's own) |
