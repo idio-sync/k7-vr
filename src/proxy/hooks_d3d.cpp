@@ -357,6 +357,7 @@ static float g_aim_hud_mask = 0.6f;                   // HUD centre band hidden 
 static bool g_laser_depth = true;                     // walls hide the laser (`gun laserdepth 0`: debugging)
 static bool g_steer = true;                           // the hand steers the game's aim / pointer (`gun steer 0`)
 static bool g_texgen_ref = true;                      // screen gradients from the aim-start camera ([vr] texgen_ref, `gun texref`)
+static bool g_cam_from_draw = true;                   // aim mode: the camera each frame was drawn with, read from its draws (`gun camdraw`)
 static bool g_laser_ready;                            // g_laser_pose is this frame's
 static vr::Pose g_laser_pose;                         // the hand in the game camera's eye space (game units)
 static float g_laser_from, g_laser_to;                // this frame's beam, metres along the hand's ray
@@ -422,6 +423,7 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "laser") g_laser_length = v[0];
     else if (name == "laserdepth") g_laser_depth = v[0] != 0;
     else if (name == "steer") g_steer = v[0] != 0;  // 0: the hand doesn't steer the game's aim (testing)
+    else if (name == "camdraw") g_cam_from_draw = v[0] != 0;  // 0: assume the one-frame camera lag (as before)
     else if (name == "texref") g_texgen_ref = v[0] != 0;  // 0: gradients follow the game camera (as before)
     else if (name == "depth") g_aim_depth = v[0] != 0;  // 0: aim at converge M along the ray (the old way)
     else logf("gun: unknown setting '%s'", name.c_str());
@@ -505,33 +507,19 @@ void request_aim_trace(int frames) { g_aim_trace = frames; }
 
 static float yaw_of(float fx, float fz) { return atan2f(fx, fz); }
 
-static void relock_aim() {
-    const bool first = !g_relocked;
-    g_relocked = true;
-    float eye[3], tgt[3];
-    if (!g_anchor_set || !aim_camera(eye, tgt)) return;
-    if (first && g_aim_trace > 0) {
-        float aimctl[2] = {};
-        memcpy(aimctl, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + 0x46beac), 8);
-        logf("aimtrace frame %u: written %.3f aimctl %.3f manager %.3f", g_frame, g_aim_written_yaw, aimctl[1],
-             yaw_of(tgt[0] - eye[0], tgt[2] - eye[2]));
-    }
+// Aim-mode cameras (game units, in the anchor frame): the manager's at this frame's first draw,
+// the one it reported a frame earlier, the one this frame is taken to be drawn with, and the
+// one when aiming began (the gradients' reference).
+static vr::Pose g_now_cam, g_next_cam, g_drawn_cam, g_ref_cam;
+
+// Both eyes' head transforms, the gradients' reference transform and the gun in the hand, for
+// a frame drawn with the game camera `cam`.
+static void apply_aim_cam(const vr::Pose& cam) {
     const float u = vr::unit();
-    // The game draws each frame with the camera it reported one frame earlier (measured with
-    // aimtrace: the manager's camera at the first draw is the next frame's), so lock against that.
-    static vr::Pose drawn_cam, next_cam, ref_cam;
-    if (first) {
-        const vr::Pose now = vr::compose(vr::inverse(g_anchor), vr::look_at(eye, tgt));  // game units
-        if (!g_prev_cam_valid) ref_cam = now;  // the camera when aiming began
-        drawn_cam = g_prev_cam_valid ? next_cam : now;
-        next_cam = now;
-        g_prev_cam_valid = true;
-    }
-    const vr::Pose cam = drawn_cam;
     vr::relock(vr::scaled(cam, u), g_eyes);
     // The game's screen-space gradients are generated from the reference camera's view, not the
     // hand-steered one (see patch_texgen in hooks_compile.cpp). [vr] texgen_ref=0 / `gun texref 0`: off.
-    const vr::Pose to_ref = vr::compose(vr::inverse(ref_cam), cam);
+    const vr::Pose to_ref = vr::compose(vr::inverse(g_ref_cam), cam);
     for (int e = 0; e < 2; ++e) {
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 4; ++j) g_eyes[e].ref[i * 4 + j] = to_ref.m[i][j];
@@ -556,6 +544,67 @@ static void relock_aim() {
     m[12] = 1;
     m[13] = g_gun_pivot[2] + g_gun_clip;
     g_ctx->UpdateSubresource(g_draw_cb[1], 0, nullptr, m, 0, 0);
+}
+
+static void relock_aim() {
+    const bool first = !g_relocked;
+    g_relocked = true;
+    float eye[3], tgt[3];
+    if (!g_anchor_set || !aim_camera(eye, tgt)) return;
+    if (first && g_aim_trace > 0) {
+        float aimctl[2] = {};
+        memcpy(aimctl, reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + 0x46beac), 8);
+        logf("aimtrace frame %u: written %.3f aimctl %.3f manager %.3f", g_frame, g_aim_written_yaw, aimctl[1],
+             yaw_of(tgt[0] - eye[0], tgt[2] - eye[2]));
+    }
+    // The game usually draws a frame with the camera it reported one frame earlier (aimtrace: the
+    // manager's camera at the first draw is the next frame's), so lock against that for now; the
+    // frame's first world draw then says which camera it really was (correct_aim_cam).
+    if (first) {
+        g_now_cam = vr::compose(vr::inverse(g_anchor), vr::look_at(eye, tgt));
+        if (!g_prev_cam_valid) g_ref_cam = g_now_cam;  // the camera when aiming began
+        g_drawn_cam = g_prev_cam_valid ? g_next_cam : g_now_cam;
+        g_next_cam = g_now_cam;
+        g_prev_cam_valid = true;
+    }
+    apply_aim_cam(g_drawn_cam);
+}
+
+// Angle between two cameras' forward axes, radians.
+static float forward_angle(const vr::Pose& a, const vr::Pose& b) {
+    const float d = a.m[0][2] * b.m[0][2] + a.m[1][2] * b.m[1][2] + a.m[2][2] * b.m[2][2];
+    return acosf(d > 1 ? 1 : d < -1 ? -1 : d);
+}
+
+// The frame's first world draw (after the arm and gun): the camera it was really drawn with.
+// The one-frame lag above doesn't always hold: above 60 fps the game's camera updates and its
+// draws don't pair up one to one, so while the hand moves the eyes and the gradients' reference
+// were a frame off on some frames (the gradients swam with the gun in the headset). The draw's
+// model-view rotation is the camera's (level geometry has none of its own); it is used when it
+// is close to one of the recent cameras, so a first draw with its own rotation changes nothing.
+static void correct_aim_cam() {
+    if (!g_aim_mode || !g_anchor_set || !g_relocked || !g_cam_from_draw) return;
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (it == g_cb.end() || it->second.size() < kTemplateCbMin) return;
+    const float* f = reinterpret_cast<const float*>(it->second.data());  // model-view rows (world -> eye)
+    vr::Pose world{};  // the camera in the world: the transposed rotation, at the aim eye
+    for (int r = 0; r < 3; ++r) {
+        const float len = sqrtf(f[r * 4] * f[r * 4] + f[r * 4 + 1] * f[r * 4 + 1] + f[r * 4 + 2] * f[r * 4 + 2]);
+        if (len < 1e-6f) return;
+        for (int c = 0; c < 3; ++c) world.m[c][r] = f[r * 4 + c] / len;
+    }
+    vr::Pose cam = vr::compose(vr::inverse(g_anchor), world);
+    for (int i = 0; i < 3; ++i) cam.m[i][3] = g_drawn_cam.m[i][3];  // the aim eye doesn't move
+    constexpr float kTolerance = 3 * 3.14159265f / 180;
+    const float to_drawn = forward_angle(cam, g_drawn_cam), to_now = forward_angle(cam, g_now_cam);
+    if (to_drawn > kTolerance && to_now > kTolerance) return;
+    if (to_drawn < 1e-5f) return;  // already right
+    g_drawn_cam = cam;
+    apply_aim_cam(cam);
 }
 
 // ---- The aim laser ----
@@ -1760,7 +1809,8 @@ static void draw_stereo(DrawFn draw) {
             gun = true;
             find_gun_pivot();
         } else {
-            if (g_gun_run == 1 && g_aim_trace > 0) {  // the first world draw: the camera it was drawn with
+            const bool trace = g_gun_run == 1 && g_aim_trace > 0;
+            if (trace) {  // the first world draw: the camera it was drawn with
                 ID3D11Buffer* cb0 = nullptr;
                 g_ctx->VSGetConstantBuffers(0, 1, &cb0);
                 if (cb0) {
@@ -1774,6 +1824,11 @@ static void draw_stereo(DrawFn draw) {
                 --g_aim_trace;
             }
             g_gun_run = 2;
+            correct_aim_cam();
+            if (trace && g_anchor_set) {  // and the one the eyes and the gradients' reference now follow
+                const vr::Pose w = vr::compose(g_anchor, g_drawn_cam);
+                logf("aimtrace frame %u: locked %.3f", g_frame, yaw_of(-w.m[0][2], -w.m[2][2]));
+            }
         }
     }
     if (gun && g_draw_cb[1]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[1]);
