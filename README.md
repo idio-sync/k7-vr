@@ -79,6 +79,7 @@ Under `[vr]` in `k7vr\k7vr.ini` (all are listed at the top of `src\vr\vr.h`):
 | `gun_pivot` | auto | the gun's grip in the game's aim view; found per character when aiming starts |
 | `no_laser_guns` | 1269 | gun meshes (vertex counts, logged when aiming starts) that get no laser; 1269 = Dan's revolver |
 | `aim_depth` | 1 | aim where the controller's ray meets the scene, so shots land where you point at any range (0 = at `aim_converge_m`) |
+| `aim_ignore_m` | 1.2 | surfaces nearer your eye than this don't count as the ray's hit (your gun and hand) |
 | `aim_converge_m` | 10 | distance along the ray aimed at when the hit isn't known (ray out of view, `aim_depth=0`) |
 | `laser_m` | 30 | laser length (0 = no laser) |
 | `aim_hud_mask` | 0.6 | width of the HUD's centre band hidden in aim mode (the game's crosshair) |

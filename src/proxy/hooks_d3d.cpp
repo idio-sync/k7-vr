@@ -342,6 +342,7 @@ static float g_gun_clip = 2.0f;                       // the arm (sleeve) is cut
 static float g_aim_converge = 10;                     // metres, when the ray's hit isn't known
 static bool g_aim_depth = true;                       // aim at the ray's measured hit ([vr] aim_depth, `gun depth`)
 static float g_hit_min = 0.6f, g_hit_max = 60;        // metres along the ray searched: past the gun, to far out
+static float g_hit_ignore = 1.2f;                     // metres from the eye: nearer is the gun and hand ([vr] aim_ignore_m)
 static bool g_aim_ray_ready;                          // g_laser_pose is this frame's hand (also without a laser)
 static bool g_hit_done;                               // the ray was measured this frame
 static unsigned g_hit_session;                        // aim sessions so far (stale results are dropped)
@@ -385,6 +386,8 @@ static void init_draw_buffers() {
     GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_converge = float(_wtof(buf));
     g_aim_depth = GetPrivateProfileIntW(L"vr", L"aim_depth", 1, ini.c_str()) != 0;
+    GetPrivateProfileStringW(L"vr", L"aim_ignore_m", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_hit_ignore = float(_wtof(buf));
     g_texgen_ref = GetPrivateProfileIntW(L"vr", L"texgen_ref", 1, ini.c_str()) != 0;
     GetPrivateProfileStringW(L"vr", L"laser_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_laser_length = float(_wtof(buf));
@@ -426,6 +429,7 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "camdraw") g_cam_from_draw = v[0] != 0;  // 0: assume the one-frame camera lag (as before)
     else if (name == "texref") g_texgen_ref = v[0] != 0;  // 0: gradients follow the game camera (as before)
     else if (name == "depth") g_aim_depth = v[0] != 0;  // 0: aim at converge M along the ray (the old way)
+    else if (name == "ignore") g_hit_ignore = v[0];     // metres from the eye that don't count (gun, hand)
     else logf("gun: unknown setting '%s'", name.c_str());
     logf("gun: scale %g pivot %g,%g,%g clip %g converge %g depth %d hud mask %g", g_gun_scale, g_gun_pivot[0],
          g_gun_pivot[1], g_gun_pivot[2], g_gun_clip, g_aim_converge, int(g_aim_depth), g_aim_hud_mask);
@@ -840,7 +844,7 @@ static const char kHitCs[] =
     "RWBuffer<uint> result : register(u0);\n"
     "RWBuffer<float4> trace : register(u1);\n"  // per sample: its depth, the buffer's, the pixel (`aimtrace`)
     "cbuffer Hit : register(b0) { float4 org; float4 dir; float4 head[3]; float4 px; float4 py; float4 projz; float4 projw;\n"
-    "                             float4 pc; float4 ray; };\n"  // ray: first distance (units), ln(step), depth size
+    "                             float4 pc; float4 ray; float4 nearz; };\n"  // ray: first distance (units), ln(step), depth size
     "[numthreads(128, 1, 1)] void main(uint i : SV_GroupIndex) {\n"
     "  float4 p = float4(org.xyz + ray.x * exp(ray.y * i) * dir.xyz, 1);\n"
     "  float4 e = float4(dot(head[0], p), dot(head[1], p), dot(head[2], p), 1);\n"
@@ -853,10 +857,13 @@ static const char kHitCs[] =
     "  trace[i] = float4(-2, -2, ndc);\n"
     "  if (abs(ndc.x) >= 1 || abs(ndc.y) >= 1) return;\n"
     "  uint2 pix = uint2((ndc.x * 0.5 + 0.5) * ray.z, (0.5 - ndc.y * 0.5) * ray.w);\n"
-    "  trace[i] = float4(c.z / c.w, depth[pix], pix);\n"
+    "  float b = depth[pix];\n"
+    "  trace[i] = float4(c.z / c.w, b, pix);\n"
+    // The game's depth is cleared to 0 and keeps the nearest = largest value. Anything nearer the
+    // eye than nearz.x is the gun and hand (or a wall in your face): this sample is unknown.
+    "  if (b > nearz.x) return;\n"
     "  InterlockedMax(result[1], i + 1);\n"
-    // The game's depth is cleared to 0 and keeps the nearest = largest value.
-    "  if (depth[pix] > c.z / c.w * 1.003) InterlockedMax(result[0], 128u - i);\n"
+    "  if (b > c.z / c.w * 1.003) InterlockedMax(result[0], 128u - i);\n"
     "}\n";
 
 static bool hit_init() {
@@ -864,7 +871,7 @@ static bool hit_init() {
     if (g_hit_failed) return false;
     g_hit_failed = true;
     if (ID3DBlob* cs = compile_hlsl(kHitCs, "cs_5_0", "k7vr_aim_hit")) {
-        D3D11_BUFFER_DESC cbd{11 * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        D3D11_BUFFER_DESC cbd{12 * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
         D3D11_BUFFER_DESC bd{8, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0, 0};
         D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
         ud.Format = DXGI_FORMAT_R32_UINT;
@@ -936,9 +943,9 @@ static void measure_aim_hit(ID3D11DepthStencilView* dsv) {
     if (it == g_cb.end() || it->second.size() < kPixelCenterOffset + 16) return;
     const float* f = reinterpret_cast<const float*>(it->second.data());
     struct {
-        float org[4], dir[4], head[12], px[4], py[4], projz[4], projw[4], pc[4], ray[4];
+        float org[4], dir[4], head[12], px[4], py[4], projz[4], projw[4], pc[4], ray[4], nearz[4];
     } c{};
-    static_assert(sizeof(c) == 11 * 16, "the shader's Hit constants");
+    static_assert(sizeof(c) == 12 * 16, "the shader's Hit constants");
     const vr::Pose& q = g_laser_pose;  // the hand in the game camera's eye space (game units)
     for (int i = 0; i < 3; ++i) c.org[i] = q.m[i][3], c.dir[i] = -q.m[i][2];
     c.org[3] = 1;
@@ -951,6 +958,11 @@ static void measure_aim_hit(ID3D11DepthStencilView* dsv) {
     c.ray[0] = g_hit_min / vr::unit();
     c.ray[1] = std::log(g_hit_max / g_hit_min) / float(kHitSamples - 1);
     c.ray[2] = float(w), c.ray[3] = float(h);
+    {  // the depth of a point g_hit_ignore metres straight ahead of the eye
+        const float zn = -g_hit_ignore / vr::unit();
+        const float z = c.projz[2] * zn + c.projz[3], pw = c.projw[2] * zn + c.projw[3];
+        c.nearz[0] = pw > 0 ? (pw * c.pc[3] - z * c.pc[2]) / pw : 1e30f;
+    }
     g_ctx->UpdateSubresource(g_hit_cb, 0, nullptr, &c, 0, 0);
 
     // The depth can't be read while it is bound for output: unbind the targets for the pass.
@@ -1024,13 +1036,10 @@ static void poll_aim_hits() {
         memcpy(r, m.pData, sizeof(r));
         g_ctx->Unmap(g_hit_staging[s], 0);
         if (!mine) continue;
-        // Nothing known when the ray starts behind something (the arm while it is raised, a hand
-        // inside a wall) or leaves the eye's view before meeting anything.
+        // Nothing new when the ray starts behind something (a hand inside a wall) or leaves the
+        // eye's view (or goes behind the gun) before meeting anything: the last hit stays a while.
         const unsigned hit = r[0] ? kHitSamples - r[0] : kHitSamples;
-        if (hit == 0 || (hit == kHitSamples && r[1] < kHitSamples)) {
-            g_hit_valid = false;
-            continue;
-        }
+        if (hit == 0 || (hit == kHitSamples && r[1] < kHitSamples)) continue;
         const float step = std::log(g_hit_max / g_hit_min) / float(kHitSamples - 1);
         // Between the sample before the first one behind a surface and that one; the far end if none.
         g_hit_m = hit < kHitSamples ? g_hit_min * std::exp(step * (float(hit) - 0.5f)) : g_hit_max;
