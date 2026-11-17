@@ -1465,22 +1465,29 @@ static void draw_in_rects(const D3D11_RECT* rects, int n, DrawFn draw) {
     if (rs) rs->Release();
 }
 
+// Where the game camera's (intended) frustum lands in a width x height image of `eye`: rect =
+// left, top, right, bottom pixels. False when the game isn't inflating its FOV (no intended
+// frustum to place) or its projection isn't known yet; an empty rect when it's out of view.
+static bool game_view_in_eye(int eye, int width, int height, int rect[4]) {
+    const float intended = fov_inflate_intended();
+    const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
+    if (intended <= 0 || ratio <= 0) return false;
+    const float tan_y = tanf(intended * 3.14159265f / 360);
+    vr::frustum_scissor(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, tan_y * ratio, tan_y, width, height, rect);
+    return true;
+}
+
 // Draws with a scissor limited to where the game camera's (intended) frustum lands in `eye`.
 template <typename DrawFn>
 static void draw_scissored(int eye, DrawFn draw) {
-    const float intended = fov_inflate_intended();
-    const float ratio = g_last_proj[0] != 0 ? g_last_proj[5] / g_last_proj[0] : 0;
     D3D11_VIEWPORT vp;
     UINT nvp = 1;
     g_ctx->RSGetViewports(&nvp, &vp);
-    if (intended <= 0 || ratio <= 0 || nvp == 0) {
+    int r[4];
+    if (nvp == 0 || !game_view_in_eye(eye, int(vp.Width), int(vp.Height), r)) {
         draw();
         return;
     }
-    const float tan_y = tanf(intended * 3.14159265f / 360);
-    int r[4];
-    vr::frustum_scissor(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, tan_y * ratio, tan_y, int(vp.Width),
-                        int(vp.Height), r);
     if (r[2] <= r[0] || r[3] <= r[1]) return;  // the card's view is entirely outside this eye
     const D3D11_RECT rect{LONG(vp.TopLeftX) + r[0], LONG(vp.TopLeftY) + r[1], LONG(vp.TopLeftX) + r[2],
                           LONG(vp.TopLeftY) + r[3]};
@@ -2801,10 +2808,20 @@ static void end_frame(IDXGISwapChain* sc) {
                 swprintf(name, 64, L"pair_%03u_screen.png", g_pair_index);
                 save_texture(vr::submitted(2) ? vr::submitted(2) : screen, path_in(name));
             }
-            // (The eye's half-angle tangents: tools\catalog.py places the panels with them.)
-            logf("pair %u written (%s frame%s; eye tangents x %.4f y %.4f)", g_pair_index++,
+            // (tools\catalog.py places the panels with the eye's half-angle tangents, and crops the
+            // left eye to the game view's rectangle to compare it with pair_NNN_game.png.)
+            std::string view_rect;
+            int r[4];
+            D3D11_TEXTURE2D_DESC ld;
+            if (left && vr::submitted(0)) {
+                vr::submitted(0)->GetDesc(&ld);
+                if (game_view_in_eye(0, int(ld.Width), int(ld.Height), r))
+                    appendf(view_rect, "; game view in left eye %d %d %d %d", r[0], r[1], r[2], r[3]);
+            }
+            logf("pair %u written (%s frame%s; eye tangents x %.4f y %.4f%s)", g_pair_index++,
                  menu ? "menu" : g_frame_3d ? "3D" : "2D", g_final[1] || !left ? "" : ", right eye had no twin",
-                 g_eyes[0].px[0] ? 1 / g_eyes[0].px[0] : 0.f, g_eyes[0].py[1] ? 1 / g_eyes[0].py[1] : 0.f);
+                 g_eyes[0].px[0] ? 1 / g_eyes[0].px[0] : 0.f, g_eyes[0].py[1] ? 1 / g_eyes[0].py[1] : 0.f,
+                 view_rect.c_str());
         }
         expect_frame(menu ? 1 : left ? 0 : 2, left, screen);
         g_frame_3d = false;

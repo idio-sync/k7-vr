@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from imagechecks import FLAG_CELLS, SAME_FRAME_FLAG, compare, same_frame
+
 REPO = Path(__file__).resolve().parent.parent
 
 # vr.cpp: Panel{width_m, distance_m, drop_m}; pictures inside are 4:3.
@@ -30,15 +32,6 @@ CONTENT_ASPECT = 4 / 3
 # vr.cpp fallbacks when a pair's log line has no tangents: sim_fov 100, game_xy_ratio 1.18.
 DEFAULT_TAN_Y = math.tan(math.radians(50))
 DEFAULT_TAN_X = DEFAULT_TAN_Y * 1.18
-
-# Comparing a flat picture the headset gets (the screen panel of a 2D or menu frame) with the
-# VR-off run's picture of the same screen: both are scaled to a GRID, and a cell differs when its
-# brightness is off by more than CELL_DIFF. Over FLAG_CELLS of the cells differing flags the
-# screen. Measured on the first tours: matching screens 0-1% (a menu cursor in another place),
-# the Options TV missing its text in VR 10%.
-GRID = (64, 48)
-CELL_DIFF = 0.15
-FLAG_CELLS = 0.03
 
 STATUSES = {
     "broken": "Broken",
@@ -61,7 +54,7 @@ def parse_run(log_path):
         m = re.search(r"\] screen: (.*)$", line)
         if m:
             screens.append({"name": m.group(1).strip(), "pair": None, "shot": None, "kind": None,
-                            "tan": None, "checks": pending})
+                            "tan": None, "rect": None, "checks": pending})
             pending = []
             continue
         m = re.search(r"\] expect (\S+): (pass|FAIL)(?:: (.*?))? \((.*)\)$", line)
@@ -78,6 +71,9 @@ def parse_run(log_path):
             cur["kind"] = m.group(2)
             if m.group(3) and float(m.group(3)) > 0:
                 cur["tan"] = (float(m.group(3)), float(m.group(4)))
+            r = re.search(r"; game view in left eye (-?\d+) (-?\d+) (-?\d+) (-?\d+)", line)
+            if r:
+                cur["rect"] = tuple(int(v) for v in r.groups())
             continue
         m = re.search(r"screenshot shot_(\d+)\.png", line)
         if m and cur["shot"] is None:
@@ -160,18 +156,6 @@ def hud_on_grey(run, n):
     return Image.fromarray(np.clip(rgb + (1 - a) * 58, 0, 255).astype(np.uint8))
 
 
-def compare(vr_pic, flat_pic):
-    """How far a picture the headset gets is from the VR-off one: (share of cells that differ,
-    difference map: the VR-off picture dimmed, differing cells in red)."""
-    a = np.asarray(vr_pic.convert("L").resize(GRID, Image.BOX), dtype=np.float32) / 255
-    b = np.asarray(flat_pic.convert("L").resize(GRID, Image.BOX), dtype=np.float32) / 255
-    off = np.abs(a - b) > CELL_DIFF
-    base = np.asarray(flat_pic.resize((960, 720), Image.LANCZOS), dtype=np.float32) * 0.45
-    mask = np.asarray(Image.fromarray((off * 255).astype(np.uint8)).resize((960, 720), Image.NEAREST)) > 0
-    base[mask] = base[mask] * 0.4 + np.array([230, 40, 40], np.float32) * 0.6
-    return float(off.mean()), Image.fromarray(base.astype(np.uint8))
-
-
 def save_jpg(img, path, width):
     if img is None:
         return None
@@ -213,6 +197,17 @@ def build(game, out):
                     e["images"].append((label, name))
         else:
             e["view"] = None
+        # 3D frames: the left eye (cropped to the game's view, HUD over it) against the game's
+        # own view of the same frame.
+        e["same_frame"] = None
+        if n is not None and s["kind"] == "3D" and s["rect"]:
+            eye, game = load(vr_run / f"pair_{n:03d}_L.png"), load(vr_run / f"pair_{n:03d}_game.png")
+            if eye is not None and game is not None:
+                e["same_frame"], diff_map = same_frame(eye, s["rect"], load(vr_run / f"pair_{n:03d}_hud.png"),
+                                                       load(vr_run / f"pair_{n:03d}_hud_alpha.png"), game)
+                if diff_map is not None:
+                    name = save_jpg(diff_map, img / f"{key}-differences-from-game-view.jpg", 800)
+                    e["images"].append(("Differences from the game's own view", name))
         f = flat.get(s["name"].lower())
         e["flat"] = None
         e["differs"] = None  # share of cells that differ from VR off (2D and menu frames)
@@ -241,6 +236,7 @@ def page(entries, have_flat, findings=()):
     unreviewed = sum(1 for e in entries if not e["status"])
     failed = sum(1 for e in entries if any(not c["pass"] for c in e["checks"]))
     differ = sum(1 for e in entries if (e["differs"] or 0) > FLAG_CELLS)
+    differ_game = sum(1 for e in entries if (e["same_frame"] or 0) > SAME_FRAME_FLAG)
     kind_label = {"3D": "3D", "menu": "Menu", "2D": "2D"}
 
     cards = []
@@ -259,6 +255,12 @@ def page(entries, have_flat, findings=()):
                        f'{"Differs from" if flagged else "Matches"} the picture with VR off'
                        f'<span class="stats mono">{100 * e["differs"]:.1f}% of cells differ '
                        f'(flagged over {100 * FLAG_CELLS:.0f}%)</span></li>')
+        flagged_game = (e["same_frame"] or 0) > SAME_FRAME_FLAG
+        if e["same_frame"] is not None:
+            checks += (f'<li class="check {"fail" if flagged_game else "pass"}">'
+                       f'{"Differs from" if flagged_game else "Matches"} the game\'s own view of the same frame'
+                       f'<span class="stats mono">{100 * e["same_frame"]:.1f}% of cells differ '
+                       f'(flagged over {100 * SAME_FRAME_FLAG:.0f}%)</span></li>')
         view = (f'<figure class="main"><button class="zoom" data-src="img/{e["view"]}" aria-label="Enlarge headset view">'
                 f'<img src="img/{e["view"]}" alt="Approximate headset view of {esc(e["name"])}" loading="lazy"></button>'
                 f'<figcaption>Headset view (approximate)</figcaption></figure>') if e["view"] else \
@@ -272,7 +274,7 @@ def page(entries, have_flat, findings=()):
             f'<img src="img/{name}" alt="{esc(label)}" loading="lazy"></button><figcaption>{esc(label)}</figcaption></figure>'
             for label, name in e["images"])
         cards.append(f"""
-<article class="screen" id="s{e['n']}" data-status="{status}" data-failed="{1 if fails else 0}" data-differs="{1 if flagged else 0}">
+<article class="screen" id="s{e['n']}" data-status="{status}" data-failed="{1 if fails else 0}" data-differs="{1 if flagged else 0}" data-differs-game="{1 if flagged_game else 0}">
   <header class="screen-head">
     <span class="num mono">{e['n']:02d}</span>
     <h2>{esc(e['name'])}</h2>
@@ -280,6 +282,7 @@ def page(entries, have_flat, findings=()):
     <span class="chip status {status}">{status_text}</span>
     {'<span class="chip status broken">Check failed</span>' if fails else ''}
     {'<span class="chip status wrong">Differs from VR off</span>' if flagged else ''}
+    {'<span class="chip status wrong">Differs from the game view</span>' if flagged_game else ''}
   </header>
   <div class="pair">{view}{flat}</div>
   <div class="detail">
@@ -290,7 +293,7 @@ def page(entries, have_flat, findings=()):
 
     filters = [("all", "All", len(entries))] + [(k, v, counts[k]) for k, v in STATUSES.items()] + \
         [("unreviewed", "Not reviewed", unreviewed), ("failed", "Check failed", failed),
-         ("differs", "Differs from VR off", differ)]
+         ("differs", "Differs from VR off", differ), ("differs-game", "Differs from the game view", differ_game)]
     filter_html = "".join(
         f'<button class="filter{" on" if k == "all" else ""}" data-filter="{k}" type="button">{esc(label)} '
         f'<span class="count mono">{n}</span></button>' for k, label, n in filters)
@@ -406,7 +409,8 @@ figcaption { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; text-
       var f = b.dataset.filter;
       screens.forEach(function (s) {
         s.hidden = !(f === "all" || (f === "failed" ? s.dataset.failed === "1" :
-                     f === "differs" ? s.dataset.differs === "1" : s.dataset.status === f));
+                     f === "differs" ? s.dataset.differs === "1" :
+                     f === "differs-game" ? s.dataset.differsGame === "1" : s.dataset.status === f));
       });
     });
   });
@@ -427,3 +431,7 @@ if __name__ == "__main__":
         if e["differs"] is not None:
             mark = "DIFFERS" if e["differs"] > FLAG_CELLS else "matches"
             print(f"  {e['n']:02d} {e['name']:32s} {mark:8s} {100 * e['differs']:5.1f}% of cells differ from VR off")
+        if e["same_frame"] is not None:
+            mark = "DIFFERS" if e["same_frame"] > SAME_FRAME_FLAG else "matches"
+            print(f"  {e['n']:02d} {e['name']:32s} {mark:8s} {100 * e['same_frame']:5.1f}% of cells differ "
+                  f"from the game's own view")
