@@ -161,9 +161,9 @@ void frustum_scissor(const float head[12], const float px[4], const float py[4],
     if (out[3] < out[1]) out[3] = out[1];
 }
 
-float ortho_quad_cover(const float xy[8], const float mv0[12], const float proj[16]) {
+float ortho_cover(const float* xy, int count, const float mv0[12], const float proj[16]) {
     float lo_x = 1e9f, hi_x = -1e9f, lo_y = 1e9f, hi_y = -1e9f;
-    for (int v = 0; v < 4; ++v) {
+    for (int v = 0; v < count; ++v) {
         const float p[4] = {xy[v * 2], xy[v * 2 + 1], 0, 1};
         float e[4] = {0, 0, 0, 1};
         for (int i = 0; i < 3; ++i) e[i] = mv0[i * 4] * p[0] + mv0[i * 4 + 1] * p[1] + mv0[i * 4 + 2] * p[2] + mv0[i * 4 + 3];

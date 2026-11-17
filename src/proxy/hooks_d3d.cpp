@@ -44,7 +44,7 @@ static std::unordered_map<ID3D11Resource*, int> g_cb_kind;  // template cbuffers
 static std::unordered_map<ID3D11Resource*, void*> g_cb_mapped;
 // Where the game's dynamic vertex buffers were last mapped for writing. It appends to one large
 // buffer (WRITE_NO_OVERWRITE), so its 2D quads' vertices can be read there at draw time
-// (overlay_quad_cover) instead of being read back from the GPU.
+// (overlay_cover) instead of being read back from the GPU.
 static std::unordered_map<ID3D11Resource*, const uint8_t*> g_vb_mapped;
 
 static UINT constant_buffer_size(ID3D11Resource* res) {
@@ -1377,8 +1377,13 @@ static bool hud_target_like(ID3D11RenderTargetView* rtv) {
     return true;
 }
 
-// True when the bound pixel shader samples a texture an eye rendered (a full-screen effect over
-// the scene, e.g. the dimmed frame copy behind a name card) rather than HUD artwork.
+// True when the bound pixel shader samples a texture an eye rendered, or a frame-sized copy of
+// one (resized like the eye targets), rather than HUD artwork: a screen-image effect over the
+// scene (the dimmed frame copy behind a name card, the frame redrawn in strips before the static
+// between scenes).
+struct Resized;
+static const Resized* resized_info(ID3D11Resource* res);
+
 static bool samples_eye_image() {
     // Only the slots the pixel shader declares; other slots may hold stale bindings.
     uint32_t slots = 0xFFFFFFFF;
@@ -1398,7 +1403,7 @@ static bool samples_eye_image() {
         if (!eye && (slots & (1u << i))) {
             ID3D11Resource* res = nullptr;
             s->GetResource(&res);
-            eye = twin_tex(res, false) != nullptr;
+            eye = twin_tex(res, false) != nullptr || resized_info(res) != nullptr;
             res->Release();
         }
         s->Release();
@@ -1864,22 +1869,25 @@ static void log_hud_draw(const char* what = "hud") {
     logf("%s", s.c_str());
 }
 
-// Four vertex positions (x, y at the start of each vertex) from mapped buffer memory; false if
-// the memory can't be read (the mapping is the game's; reading it after Unmap is tolerated by
-// the drivers but not promised, hence the guard).
-static bool copy_quad_xy(const uint8_t* first, UINT stride, float xy[8]) {
+// Vertex positions (x, y at the start of each vertex) from mapped buffer memory; false if the
+// memory can't be read (the mapping is the game's; reading it after Unmap is tolerated by the
+// drivers but not promised, hence the guard).
+static bool copy_xy(const uint8_t* first, UINT stride, UINT count, float* xy) {
     __try {
-        for (int v = 0; v < 4; ++v) memcpy(&xy[v * 2], first + size_t(v) * stride, 8);
+        for (UINT v = 0; v < count; ++v) memcpy(&xy[v * 2], first + size_t(v) * stride, 8);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 }
 
-// Share of the screen the bound 2D quad covers (a non-indexed 4-vertex draw from a mapped
-// dynamic buffer, placed by its template constants), or -1 when that can't be told.
-static float overlay_quad_cover() {
-    if (g_draw_first < 0 || g_draw_count != 4) return -1;
+constexpr UINT kCoverMaxVertices = 1024;  // larger 2D draws aren't measured (overlay_cover)
+
+// Share of the screen the bound 2D draw's extent covers (a non-indexed draw of up to
+// kCoverMaxVertices from a mapped dynamic buffer, placed by its template constants: quads, the
+// scanline effect's lines), or -1 when that can't be told.
+static float overlay_cover() {
+    if (g_draw_first < 0 || g_draw_count == 0 || g_draw_count > kCoverMaxVertices) return -1;
     ID3D11Buffer* vb = nullptr;
     UINT stride = 0, offset = 0;
     g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
@@ -1893,10 +1901,10 @@ static float overlay_quad_cover() {
     auto it = g_cb.find(cb0);
     cb0->Release();
     if (!base || stride < 8 || it == g_cb.end() || it->second.size() < kTemplateCbMin) return -1;
-    float xy[8];
-    if (!copy_quad_xy(base + offset + size_t(g_draw_first) * stride, stride, xy)) return -1;
+    static float xy[kCoverMaxVertices * 2];  // (render thread only)
+    if (!copy_xy(base + offset + size_t(g_draw_first) * stride, stride, g_draw_count, xy)) return -1;
     const float* f = reinterpret_cast<const float*>(it->second.data());
-    return vr::ortho_quad_cover(xy, f, f + kProjOffset / 4);
+    return vr::ortho_cover(xy, int(g_draw_count), f, f + kProjOffset / 4);
 }
 
 static bool points_or_lines() {
@@ -1978,8 +1986,10 @@ static void draw_stereo(DrawFn draw) {
     }
     // HUD: textured 2D artwork and point/line overlays (sparkles, reticle lines) after the 3D
     // scene. Untextured triangle quads (dims, fades, clears) and screen-image effects stay per eye.
+    // (A textured quad over the whole screen is a full-screen effect, like the static that fades in
+    // between scenes: it stays in the eyes, over the whole view, as fades do. kFadeCover.)
     if (scene && kind == 2 && g_frame_3d && !eye_image && (pixel_shader_textured() || points_or_lines()) &&
-        hud_target_like(rtv[0])) {  // once, into the overlay
+        !(overlay_cover() >= kFadeCover) && hud_target_like(rtv[0])) {  // once, into the overlay
         // The laser goes in after the whole scene (it doesn't write depth, so later draws would
         // cover it) and before the HUD.
         if (g_hud_log > 0) log_hud_draw();
@@ -2003,7 +2013,7 @@ static void draw_stereo(DrawFn draw) {
         // An untextured 2D quad that isn't a full-screen fade is part of an overlay (a dim, a
         // prompt's box, a frame line, a subtitle bar): into the HUD with the overlay's text, in
         // the game's order, so the overlay stays whole. Fades stay in the eyes (the whole view).
-        const float cover = overlay_quad_cover();
+        const float cover = overlay_cover();
         if (cover >= 0 && cover < kFadeCover && hud_target_like(rtv[0])) {
             g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
             draw_hud([&] { draw_hud_masked(draw); });

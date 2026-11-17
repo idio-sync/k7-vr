@@ -183,13 +183,19 @@ static void test_ortho_quad_cover() {
     const float mv0[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -300};
     const float proj[16] = {0.003125f, 0, 0, -1, 0, -0.004167f, 0, 1, 0, 0, -0.001111f, -1.111f, 0, 0, 0, 1};
     const float lt_dim[8] = {0, 0, 384, 0, 0, 239, 384, 239};  // the LT view's dim (upper left)
-    CHECK_NEAR(ortho_quad_cover(lt_dim, mv0, proj), (384.0 / 640) * (239.0 / 480), 0.005);
+    CHECK_NEAR(ortho_cover(lt_dim, 4, mv0, proj), (384.0 / 640) * (239.0 / 480), 0.005);
     const float fade[8] = {0, 0, 640, 0, 0, 480, 640, 480};  // a full-screen fade
-    CHECK_NEAR(ortho_quad_cover(fade, mv0, proj), 1.0, 0.005);
+    CHECK_NEAR(ortho_cover(fade, 4, mv0, proj), 1.0, 0.005);
     const float past[8] = {-100, -100, 740, -100, -100, 580, 740, 580};  // larger than the screen
-    CHECK_NEAR(ortho_quad_cover(past, mv0, proj), 1.0, 0.005);
+    CHECK_NEAR(ortho_cover(past, 4, mv0, proj), 1.0, 0.005);
     const float off[8] = {700, 0, 800, 0, 700, 100, 800, 100};  // off screen
-    CHECK_NEAR(ortho_quad_cover(off, mv0, proj), 0.0, 0.005);
+    CHECK_NEAR(ortho_cover(off, 4, mv0, proj), 0.0, 0.005);
+    // Scanlines: horizontal lines from the top row to the bottom one span the screen.
+    const float lines[12] = {0, 0, 640, 0, 0, 240, 640, 240, 0, 480, 640, 480};
+    CHECK_NEAR(ortho_cover(lines, 6, mv0, proj), 1.0, 0.005);
+    // A reticle's two crossing lines span only their own box.
+    const float cross[8] = {300, 240, 340, 240, 320, 220, 320, 260};
+    CHECK_NEAR(ortho_cover(cross, 4, mv0, proj), (40.0 / 640) * (40.0 / 480), 0.002);
 }
 
 int main() {

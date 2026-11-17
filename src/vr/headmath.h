@@ -58,8 +58,9 @@ void frustum_scissor(const float head[12], const float px[4], const float py[4],
 bool frustum_rect_unclamped(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y,
                             int width, int height, int out[4]);
 
-// Share of the screen (0..1) a 2D quad covers: its four vertices' x,y (as pairs), placed by the
-// draw's model-view rows (3x4) and orthographic projection (4x4, row-major), clipped to NDC.
-float ortho_quad_cover(const float xy[8], const float mv0[12], const float proj[16]);
+// Share of the screen (0..1) a 2D draw's extent covers: the bounding box of its `count`
+// vertices' x,y (as pairs), placed by the draw's model-view rows (3x4) and orthographic
+// projection (4x4, row-major), clipped to NDC.
+float ortho_cover(const float* xy, int count, const float mv0[12], const float proj[16]);
 
 }  // namespace k7::vr

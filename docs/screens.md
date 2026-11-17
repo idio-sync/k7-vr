@@ -178,12 +178,14 @@ Status: unsure
 cutscenes should be framed at all in VR).
 
 ## static transition
-Status: wrong
+Status: ok
 
-The static between scenes. When the tour catches it as a 2D frame it's on the screen panel, as
-with VR off; when caught over a 3D frame it shrinks to a rectangle in the middle of the view (a
-textured full-screen effect, so it goes to the HUD panel). Not covered by the overlay fix, which
-handles untextured quads; full-screen textured effects need the same "fade" treatment.
+The static between scenes. Its last part is 2D frames (on the screen panel, as all 2D screens);
+over 3D frames it used to shrink to a rectangle on the HUD panel, as did the scanlines and the
+frame redrawn in strips that come before it. Fixed 2026-11-17: 2D draws whose extent covers
+the screen (the noise quad, the 120 scanlines) and draws that sample a frame-sized copy of the
+picture stay in the eyes, over the whole view, like fades. The 2D comparison flags this screen
+because the two runs catch different moments of the moving noise.
 
 ## subtitled cutscene
 Status: unsure
