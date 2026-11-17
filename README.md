@@ -126,13 +126,20 @@ when that folder exists).
   pages, the cutscene into Dan Smith's lobby, the persona list, a persona change and a junction
   choice. Each `expect 3d|menu|2d` in it checks which way the frames went, that the hand-off
   didn't keep making textures, and that what the eyes or the screen panel got isn't black and
-  matches its source; each `screen NAME` saves what the headset is handed. `-Flat` runs the
-  same tour with VR off, for the reference picture of each screen. Run it before a headset
-  session; it can't judge comfort, scale, aim feel or the real controllers' bindings.
+  matches its source; each `screen NAME` saves what the headset is handed, and each `sweep`
+  after a 3D screen looks around it (8 head directions: the views the original never shows).
+  `-Flat` runs the same tour with VR off, for the reference picture of each screen. Run it
+  before a headset session; it can't judge comfort, scale, aim feel or the real controllers'
+  bindings.
 - `python tools\catalog.py` builds the screen catalogue (`<game>\k7vr\tour\catalog\index.html`)
   from the last two tours: per screen, an approximate headset view (the left eye with the HUD
   and screen panels drawn where they float), the VR-off reference, the raw images, the checks,
-  and the status and notes in `docs\screens.md`.
+  the look-around strip, and the status and notes in `docs\screens.md`. It flags 2D and menu
+  screens that differ from VR off, and 3D screens whose look-around shows parts fixed to the
+  view, something in one eye only, or scenery dropped when turning (where a set simply ends
+  isn't detected: that's for people to spot in the strip). 3D screens
+  are also compared with the game's own view of the same frame, shown as a score only (it
+  doesn't yet tell right from wrong reliably). Checks: `python -m unittest discover -s tests`.
 - `tools\run.ps1` / `-Stop` / `-Normal` start and stop the copy.
 - `tools\cmd.ps1 'key SPACE' 'wait 2000' 'shot'` or `tools\cmd.ps1 -File tools\scripts\new_game.txt`
   sends commands; the list is at the top of `src\proxy\control.cpp` (input, screenshots, stereo

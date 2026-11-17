@@ -91,6 +91,20 @@ class HeadLockedTest(unittest.TestCase):
         self.assertAlmostEqual(share, block, delta=0.03)
 
 
+class HeadLockedPerspectiveTest(unittest.TestCase):
+    def test_head_locked_wide_view_world(self):
+        # A wide view turning: the world moves further towards the edges (here 12 px on the
+        # left, 24 px on the right, for a predicted 18), and Killer7's flat shading gives little
+        # contrast (blocks within +-0.1 of mid grey). None of it is fixed to the view.
+        rng = np.random.default_rng(3)
+        cells = rng.integers(105, 155, size=(30, 40, 1), dtype=np.uint8).repeat(3, axis=2)
+        a = np.kron(cells, np.ones((10, 10, 1), np.uint8))
+        b = np.zeros_like(a)
+        b[:, :200 - 12] = a[:, 12:200]
+        b[:, 200:400 - 24] = a[:, 224:400]
+        self.assertLess(imagechecks.head_locked(Image.fromarray(a), Image.fromarray(b), 18), 0.05)
+
+
 class OneEyeTest(unittest.TestCase):
     def test_one_eye_disparity_ok(self):
         left = textured()
@@ -106,17 +120,25 @@ class OneEyeTest(unittest.TestCase):
 
 class SweepFlagsTest(unittest.TestCase):
     def test_sweep_flags_culled(self):
-        views = {(0, 0): {"draws": 100, "undrawn": 0.1}, (45, 0): {"draws": 50, "undrawn": 0.1}}
+        views = {(0, 0): {"draws": 100}, (45, 0): {"draws": 50}}
         self.assertEqual(imagechecks.sweep_flags(views), ["culled"])
 
-    def test_sweep_flags_set_ends(self):
-        views = {(0, 0): {"draws": 100, "undrawn": 0.1}, (0, 40): {"draws": 100, "undrawn": 0.5}}
-        self.assertIn("set ends", imagechecks.sweep_flags(views))
-
     def test_sweep_flags_balanced(self):
-        views = {(0, 0): {"draws": 100, "undrawn": 0.1}, (45, 0): {"draws": 90, "undrawn": 0.2},
-                 (-90, 0): {"draws": 20, "undrawn": 0.3}}
+        views = {(0, 0): {"draws": 100}, (45, 0): {"draws": 90}, (-90, 0): {"draws": 20}}
         self.assertEqual(imagechecks.sweep_flags(views), [])
+
+
+class SceneMovesTest(unittest.TestCase):
+    def test_scene_still(self):
+        a = textured()
+        self.assertLess(imagechecks.scene_moves(Image.fromarray(a), Image.fromarray(a.copy())), 0.01)
+
+    def test_scene_animating(self):
+        a = textured(seed=4)
+        b = a.copy()
+        b[:, 200:] = textured(seed=5)[:, 200:]  # the right half changed on its own
+        # (random against random differs by over CELL_DIFF in about 60% of cells: ~0.3 overall)
+        self.assertGreater(imagechecks.scene_moves(Image.fromarray(a), Image.fromarray(b)), 0.2)
 
 
 if __name__ == "__main__":

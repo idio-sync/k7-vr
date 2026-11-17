@@ -39,6 +39,11 @@ def compare(vr_pic, flat_pic):
 # when the head turns 10 degrees, or over ONE_EYE_FLAG of the left eye has no match in the right.
 HEAD_LOCKED_FLAG = 0.15
 ONE_EYE_FLAG = 0.05
+# Head-locked isn't scored when over this share of the picture changed between the sweep's two
+# straight-ahead captures (the scene moves on its own). Measured on the 2026-11-17 tour: still
+# scenes 0-0.6%, the street cutscene's moving camera 13.5%, a camera still settling after a
+# change 10.2%.
+SCENE_MOVES_LIMIT = 0.05
 # Pictures are compared at WORK size: GRID cells of 4x4 pixels.
 WORK = (GRID[0] * 4, GRID[1] * 4)
 
@@ -54,18 +59,25 @@ def _cells(diff):
 
 
 def head_locked(straight, turned, shift_px):
-    """Share of the picture (cells of `straight` that aren't black) that matches `turned` better
-    where it was than where the world went: `turned` is the view with the head turned right, in
-    which world-locked things moved shift_px to the left."""
+    """Share of the picture that stays put when the head turns: `turned` is the view with the
+    head turned right, where the world moved left, shift_px at the centre (more towards the
+    edges of a wide view, so half to twice that is searched). Only cells that clearly decide
+    count: ones that match where they were and not where the world went (fixed to the view),
+    and ones that match where the world went and not where they were (the world). Flat cells
+    match both and are left out, as are black ones."""
     a, b = _grey(straight), _grey(turned)
-    s = max(1, round(shift_px * WORK[0] / straight.width))
-    stay = np.abs(a - b)
-    moved = np.full_like(a, 1.0)
-    moved[:, s:] = np.abs(a[:, s:] - b[:, :-s])
-    locked = (_cells(stay) < _cells(moved)) & (_cells(stay) < CELL_DIFF)
+    s0 = max(1, round(shift_px * WORK[0] / straight.width))
+    stay = _cells(np.abs(a - b))
+    moved = np.full(stay.shape, np.inf, np.float32)
+    for s in range(max(1, s0 // 2), 2 * s0 + 1):
+        diff = np.full_like(a, 1.0)
+        diff[:, s:] = np.abs(a[:, s:] - b[:, :-s])
+        moved = np.minimum(moved, _cells(diff))
+    margin = CELL_DIFF / 3
     lit = _cells(a) > 0.02
-    lit[:, : -(-s // 4)] = False  # the strip the world moved in from has nothing to match
-    return float((locked & lit).sum() / max(lit.sum(), 1))
+    locked = lit & (stay < margin) & (moved - stay > margin)
+    world = lit & (moved < margin) & (stay - moved > margin)
+    return float(locked.sum() / max((locked | world).sum(), 1))
 
 
 def one_eye(left, right, max_disparity_px):
@@ -85,20 +97,27 @@ def one_eye(left, right, max_disparity_px):
 
 
 def sweep_flags(views):
-    """Flags from a sweep's {(yaw, pitch): {"draws": n, "undrawn": share}}: "culled" when a
-    direction within 45 degrees of straight ahead draws under 0.6x what straight ahead does,
-    "set ends" when any direction has over 0.25 more of its view undrawn."""
+    """Flags from a sweep's {(yaw, pitch): {"draws": n}}: "culled" when a direction within 45
+    degrees of straight ahead draws under 0.6x what straight ahead does. (Where a set simply
+    ends isn't flagged: neither the depth buffer, every sample of which holds geometry, nor
+    the share of black, which Killer7's dark sets have anyway, told it apart. The views are
+    there to look at.)"""
     base = views.get((0, 0))
     if not base:
         return []
-    flags = []
     if any(abs(yaw) <= 45 and (yaw, pitch) != (0, 0) and v["draws"] < 0.6 * base["draws"]
            for (yaw, pitch), v in views.items()):
-        flags.append("culled")
-    if base["undrawn"] >= 0 and any(v["undrawn"] >= 0 and v["undrawn"] - base["undrawn"] > 0.25
-                                    for v in views.values()):
-        flags.append("set ends")
-    return flags
+        return ["culled"]
+    return []
+
+
+def scene_moves(first, again):
+    """Share of the picture (cells that aren't black) that changed between two captures from
+    the same direction: how much the scene moves on its own (animation, a moving camera)."""
+    a, b = _grey(first), _grey(again)
+    lit = _cells(a) > 0.02
+    changed = lit & (_cells(np.abs(a - b)) > CELL_DIFF)
+    return float(changed.sum() / max(lit.sum(), 1))
 
 
 def same_frame(eye, rect, hud_rgb, hud_alpha, game):

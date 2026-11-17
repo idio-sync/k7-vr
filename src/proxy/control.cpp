@@ -16,8 +16,8 @@
 //   mark text               log line when the step's turn comes (tools\check.ps1 waits on these)
 //   screen name             "screen: name" in the log and a pair (stereo) or screenshot (flat), for
 //                           the screen catalogue (tools\check.ps1, tools\catalog.py)
-//   sweep                   look around (stereo): 8 head directions, each saved as sweep_NNN_L.png
-//                           with its draws and undrawn share logged; back to straight ahead (~2 s)
+//   sweep                   look around (stereo): 8 head directions and straight ahead again, each
+//                           saved as sweep_NNN_L.png with its draws logged (~3 s)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
 //   dumpf ADDR N [TAG] / dumpptr PTR OFF N TAG   log N floats (memscan.cpp)
@@ -341,8 +341,10 @@ static void run_line(const std::string& line) {
         std::getline(ss, rest);
         g_steps.push_back(Step{.action = [=] { logf("mark:%s", rest.c_str()); }});
     } else if (cmd == "sweep") {  // look-around views for the catalogue (tools\catalog.py)
-        // Straight ahead and 10 degrees right first: the pair tells head-locked parts from the world.
-        static const float kDirs[][2] = {{0, 0}, {10, 0}, {-45, 0}, {45, 0}, {-90, 0}, {90, 0}, {0, 40}, {0, -40}};
+        // Straight ahead and 10 degrees right first: the pair tells head-locked parts from the
+        // world. Straight ahead again last: how much the scene moved on its own meanwhile.
+        static const float kDirs[][2] = {{0, 0}, {10, 0}, {-45, 0}, {45, 0}, {-90, 0},
+                                         {90, 0}, {0, 40}, {0, -40}, {0, 0}};
         for (const auto& d : kDirs) {
             const float yaw = d[0], pitch = d[1];
             g_steps.push_back(Step{.view = true, .yaw = yaw, .pitch = pitch});

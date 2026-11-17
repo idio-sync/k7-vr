@@ -20,6 +20,16 @@ sits at the bottom of the view while its text is in the centre. The pause menu h
 problem until b1b70f6 moved menus whole onto the screen panel; these overlays draw too few
 untextured quads to count as menus (see kMenuQuads).
 
+## Cutscene close-ups don't line up with the game's own view
+
+Each 3D screen is also compared with the mod's own flat picture of the same frame (the left eye
+cropped to where the game camera's view lands, the HUD laid over). In play they agree (0.2-4%
+of the picture differs), but in cutscene close-ups the eye inside that crop shows a wider shot
+than the game's view at the same zoom: Garcian whole and about three times smaller where the
+game shows his face (16-33% differs). Either cutscenes reach the eyes differently, or the crop is
+placed wrongly when the camera zooms; not investigated yet. Until then the score is shown as
+information only.
+
 ## language select
 Status: ok
 
@@ -85,7 +95,8 @@ middle of the view (HUD panel) and the bar is drawn across the eye. See the patt
 Status: ok
 
 The Japanese title card ("a free-for-all fight in the Celtic building") is a 2D frame on the
-screen panel.
+screen panel. If it's flagged as differing from VR off, look at both pictures: its text fades
+in, and the two runs reach it a moment apart.
 
 ## corridor
 Status: ok
@@ -150,7 +161,12 @@ Status: ok
 Status: wrong
 
 A 3D scene (curtains, the pigeon). The set only covers the original framing: above it, the top
-third of the wider VR view is black. A case of looking where the flat camera never points.
+third of the wider VR view is black. A case of looking where the flat camera never points: the
+look-around strip shows how far it goes (no check detects it; the set is dark by design).
+
+The look-around flags it as fixed to the view (about 25%). Most likely a false flag: the
+curtains are rows of repeating vertical stripes, which match themselves after a small turn.
+The strip's views show the curtains moving with the world at 45 and 90 degrees.
 
 ## Blood page
 Status: ok

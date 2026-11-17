@@ -21,8 +21,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from imagechecks import (FLAG_CELLS, HEAD_LOCKED_FLAG, ONE_EYE_FLAG, SAME_FRAME_FLAG, compare, head_locked,
-                         one_eye, same_frame, sweep_flags)
+from imagechecks import (FLAG_CELLS, HEAD_LOCKED_FLAG, ONE_EYE_FLAG, SAME_FRAME_FLAG, SCENE_MOVES_LIMIT, compare,
+                         head_locked, one_eye, same_frame, scene_moves, sweep_flags)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -76,10 +76,10 @@ def parse_run(log_path):
             if r:
                 cur["rect"] = tuple(int(v) for v in r.groups())
             continue
-        m = re.search(r"\] sweep (\d+) yaw (-?[\d.]+) pitch (-?[\d.]+): draws (\d+), undrawn (-?[\d.]+)", line)
+        m = re.search(r"\] sweep (\d+) yaw (-?[\d.]+) pitch (-?[\d.]+): draws (\d+)", line)
         if m:  # (a sweep belongs to the screen before it; "not 3D" directions are left out)
             cur["sweep"].append({"n": int(m.group(1)), "yaw": round(float(m.group(2))), "pitch": round(float(m.group(3))),
-                                 "draws": int(m.group(4)), "undrawn": float(m.group(5))})
+                                 "draws": int(m.group(4))})
             continue
         m = re.search(r"screenshot shot_(\d+)\.png", line)
         if m and cur["shot"] is None:
@@ -238,23 +238,27 @@ LOOK_FLAGS = {
     "head-locked": "Parts fixed to the view",
     "one eye": "Something in one eye only",
     "culled": "Scenery dropped when turning",
-    "set ends": "Undrawn areas when turning",
 }
 
 
 def look_around(e, s, run, img, key):
     """The sweep's views (a strip) and the look-around flags: head-locked parts (straight ahead
-    against 10 degrees right), one-eye parts (the pair's two eyes), culling and undrawn areas."""
+    against 10 degrees right, unless the scene moved on its own between the two straight-ahead
+    captures), one-eye parts (the pair's two eyes) and culling."""
     e["sweep"], e["look_flags"] = [], []
-    views = {(v["yaw"], v["pitch"]): v for v in s["sweep"]}
-    for v in s["sweep"]:
+    sweep = s["sweep"]
+    again = sweep[-1] if len(sweep) > 1 and (sweep[-1]["yaw"], sweep[-1]["pitch"]) == (0, 0) else None
+    views = {(v["yaw"], v["pitch"]): v for v in (sweep[:-1] if again else sweep)}
+    for v in sweep:
         name = save_jpg(load(run / f"sweep_{v['n']:03d}_L.png"), img / f"{key}-sweep-{v['n']:03d}.jpg", 400)
         if name:
-            e["sweep"].append(dict(v, file=name))
+            e["sweep"].append(dict(v, file=name, again=v is again))
     straight, turned = views.get((0, 0)), views.get((10, 0))
     if straight and turned:
         a, b = load(run / f"sweep_{straight['n']:03d}_L.png"), load(run / f"sweep_{turned['n']:03d}_L.png")
-        if a is not None and b is not None:
+        c = load(run / f"sweep_{again['n']:03d}_L.png") if again else None
+        e["moving"] = scene_moves(a, c) if a is not None and c is not None else None
+        if a is not None and b is not None and (e["moving"] is None or e["moving"] <= SCENE_MOVES_LIMIT):
             tan_x = (s["tan"] or (DEFAULT_TAN_X, DEFAULT_TAN_Y))[0]
             e["head_locked"] = head_locked(a, b, round(a.width * math.tan(math.radians(10)) / (2 * tan_x)))
             if e["head_locked"] > HEAD_LOCKED_FLAG:
@@ -270,8 +274,8 @@ def look_around(e, s, run, img, key):
 
 
 def sweep_caption(v):
-    undrawn = "" if v["undrawn"] < 0 else f" &middot; {100 * v['undrawn']:.0f}% undrawn"
-    return f"yaw {v['yaw']:+d}&deg; pitch {v['pitch']:+d}&deg; &middot; {v['draws']} draws{undrawn}"
+    where = "straight ahead again" if v["again"] else f"yaw {v['yaw']:+d}&deg; pitch {v['pitch']:+d}&deg;"
+    return f"{where} &middot; {v['draws']} draws"
 
 
 def game_flagged(e):
@@ -318,6 +322,10 @@ def page(entries, have_flat, findings=()):
                        f'{"Differs from" if flagged_game else "Matches"} the game\'s own view of the same frame'
                        f'<span class="stats mono">{100 * e["same_frame"]:.1f}% of cells differ '
                        f'(flagged over {100 * SAME_FRAME_FLAG:.0f}%)</span></li>')
+        if e.get("moving") is not None and e["moving"] > SCENE_MOVES_LIMIT:
+            checks += (f'<li class="check info">Head turned 10&deg;: not checked, the scene moves on its own'
+                       f'<span class="stats mono">{100 * e["moving"]:.1f}% of the picture changed between the two '
+                       f'straight-ahead views (checked up to {100 * SCENE_MOVES_LIMIT:.0f}%)</span></li>')
         if e.get("head_locked") is not None:
             flag = e["head_locked"] > HEAD_LOCKED_FLAG
             checks += (f'<li class="check {"fail" if flag else "pass"}">Head turned 10&deg;: '

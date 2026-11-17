@@ -315,8 +315,6 @@ static int g_menu_quads;             // untextured 2D quads drawn into the eyes 
 static bool g_menu_shown;            // the last frame went to the screen panel as a menu (logs changes)
 static unsigned g_eye_targets_made;  // the game's 4:3 targets made at the eye size (hk_CreateTexture2D)
 static ID3D11Texture2D* g_scene_tex; // the scene target of this frame's last perspective draw (diagnostics)
-static ID3D11Texture2D* g_scene_depth;  // its depth buffer (`sweep` measures what nothing was drawn into)
-static float g_scene_depth_clear = 1;   // the value the eye-sized depth buffers were last cleared to
 static ID3D11Texture2D* g_final[2];  // each eye's final image (the texture the game blits to the window)
 static ID3D11Texture2D* g_hud_tex;
 static ID3D11RenderTargetView* g_hud_rtv;
@@ -1885,7 +1883,6 @@ static void draw_stereo(DrawFn draw) {
         g_frame_3d = true;
         D3D11_TEXTURE2D_DESC sd;
         g_scene_tex = texture_of(rtv[0], &sd);
-        g_scene_depth = texture_of(dsv, &sd);
     }
     const bool eye_image = scene && kind == 2 && samples_eye_image();
     if (eye_image && !g_frame_3d) {
@@ -2251,12 +2248,6 @@ static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthSten
     }
     real_of(c)->ClearDepthStencilView(dsv, flags, d, st);
     mirror_clear_dsv(dsv, flags, d, st);
-    if ((flags & D3D11_CLEAR_DEPTH) && dsv) {  // the scene's depth is one of the eye-sized ones
-        ID3D11Resource* res = nullptr;
-        dsv->GetResource(&res);
-        if (resized_info(res)) g_scene_depth_clear = d;
-        if (res) res->Release();
-    }
 }
 
 // A texture the CPU reads (the game's readback staging). Copies into one come from the game view
@@ -2539,53 +2530,6 @@ static float mean_level(ID3D11Texture2D* tex) {
             sum += p[0] + p[1] + p[2];
         }
     return n ? float(sum / (n * 3.0 * 255.0)) : -1;
-}
-
-// Share of a depth buffer still at the value it was cleared to (every 4th pixel each way): the
-// part of the view nothing was drawn into. -1 when it can't be read.
-static float undrawn_share(ID3D11Texture2D* depth, float clear) {
-    if (!depth) return -1;
-    D3D11_TEXTURE2D_DESC d;
-    depth->GetDesc(&d);
-    const bool f32 = d.Format == DXGI_FORMAT_R32_TYPELESS || d.Format == DXGI_FORMAT_D32_FLOAT ||
-                     d.Format == DXGI_FORMAT_R32_FLOAT;
-    const bool d24 = d.Format == DXGI_FORMAT_R24G8_TYPELESS || d.Format == DXGI_FORMAT_D24_UNORM_S8_UINT;
-    if ((!f32 && !d24) || d.SampleDesc.Count != 1) {
-        static bool logged;
-        if (!logged) logf("sweep: depth format %d (%u samples) not handled", d.Format, d.SampleDesc.Count);
-        logged = true;
-        return -1;
-    }
-    D3D11_TEXTURE2D_DESC sd = d;
-    sd.MipLevels = 1;
-    sd.ArraySize = 1;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags = 0;
-    ID3D11Texture2D* staging = nullptr;
-    if (FAILED(g_dev->CreateTexture2D(&sd, nullptr, &staging))) return -1;
-    g_ctx->CopyResource(staging, depth);
-    float share = -1;
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (SUCCEEDED(g_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
-        unsigned n = 0, at_clear = 0;
-        for (UINT y = 0; y < d.Height; y += 4) {
-            auto row = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
-            for (UINT x = 0; x < d.Width; x += 4, ++n) {
-                uint32_t v;
-                memcpy(&v, row + x * 4, 4);
-                float z;
-                if (f32) memcpy(&z, &v, 4);
-                else z = float(v & 0xFFFFFF) / float(0xFFFFFF);
-                if (fabsf(z - clear) <= 1e-6f) ++at_clear;
-            }
-        }
-        g_ctx->Unmap(staging, 0);
-        share = n ? float(at_clear) / float(n) : -1;
-    }
-    staging->Release();
-    return share;
 }
 
 static bool same_size(ID3D11Texture2D* a, ID3D11Texture2D* b, std::string* why, const char* what) {
@@ -2892,15 +2836,13 @@ static void end_frame(IDXGISwapChain* sc) {
                 wchar_t name[64];
                 swprintf(name, 64, L"sweep_%03u_L.png", n);
                 save_texture(vr::submitted(0), path_in(name));
-                logf("sweep %03u yaw %g pitch %g: draws %u, undrawn %.3f", n, g_sweep_yaw, g_sweep_pitch,
-                     g_draws_last, undrawn_share(g_scene_depth, g_scene_depth_clear));
+                logf("sweep %03u yaw %g pitch %g: draws %u", n, g_sweep_yaw, g_sweep_pitch, g_draws_last);
             }
         }
         g_frame_3d = false;
         g_menu_quads = 0;
         g_final[0] = g_final[1] = nullptr;
         g_scene_tex = nullptr;
-        g_scene_depth = nullptr;
         if (g_hud_rtv) {
             const float clear[4] = {0, 0, 0, 0};
             g_ctx->ClearRenderTargetView(g_hud_rtv, clear);
