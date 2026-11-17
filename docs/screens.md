@@ -23,15 +23,14 @@ tutorial's header and the opening cutscene's subtitles. Cutscene letterbox bars 
 VR: they are the background colour around the cutscene's picture, not quads, so subtitles float
 over the scene without their dark red bar (readability is a headset check).
 
-## Cutscene close-ups don't line up with the game's own view
+## Same-frame comparison of 3D screens
 
-Each 3D screen is also compared with the mod's own flat picture of the same frame (the left eye
-cropped to where the game camera's view lands, the HUD laid over). In play they agree (0.2-4%
-of the picture differs), but in cutscene close-ups the eye inside that crop shows a wider shot
-than the game's view at the same zoom: Garcian whole and about three times smaller where the
-game shows his face (16-33% differs). Either cutscenes reach the eyes differently, or the crop is
-placed wrongly when the camera zooms; not investigated yet. Until then the score is shown as
-information only.
+Each 3D screen is compared with the mod's own flat picture of the same frame: the left eye
+cropped to where the game camera's view lands, the HUD laid over. Cutscenes draw their shot into
+a letterboxed band, which the eyes stretch over the whole view, so only that band is compared
+(the pair log gives the game's viewport and band). Screens that look right score 0-5%; over 8%
+is flagged. Earlier cutscene "mismatches" (16-33%) were the comparison ignoring the letterbox,
+not a fault in the eyes.
 
 ## language select
 Status: ok
@@ -213,7 +212,12 @@ Status: ok
 The persona list (Dan, Kaede, Kevin, Coyote, Con, Mask) whole on the screen panel.
 
 ## persona change effect
-Status: ok
+Status: unsure
+
+The burning transformation is in 3D and right, but the game draws the scene around it with
+bright one-pixel stripes, which the mod's de-striping (meant for the game's alternating columns)
+blends to a smooth grey in the eyes. The same-frame check flags it for that (16.5%). Check in the
+headset whether the softened look is fine or the stripes should be kept here.
 
 ## junction choice
 Status: unsure

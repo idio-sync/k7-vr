@@ -14,13 +14,13 @@ FLAG_CELLS = 0.03
 # A crop that keeps less than this share of the game camera's view isn't compared.
 MIN_CROP = 0.25
 
-# 3D screens would be flagged when over this share of cells differ from the game's own view of
-# the same frame. None: not flagged, the score is shown as information only. Measured on the
-# reviewed screens (2026-11-17 tour) the ranges overlap: screens that look right scored 0.2-3.9%
-# in play but 16.6% (persona change) and 28% (red flower cutscene) in cutscenes, where the eye's
-# crop shows a wider shot than the game's view at the same zoom (unexplained); screens that look
-# wrong scored 2.7% (Dan Smith title card, dark) to 12.5% (LT eye view).
-SAME_FRAME_FLAG = None
+# 3D screens are flagged when over this share of cells differ from the game's own view of the
+# same frame (None would show the score as information only). Measured on the 2026-11-17 tours,
+# comparing cutscenes within their letterbox band: screens that look right 0-4.9%; the split
+# overlays before their fix 9.2% (subtitles) to 13.2% (title card); the persona change 16.5%
+# (its stripe effect, softened in VR by de-striping). The silhouette tutorial's split header
+# scored 3.4%, too small to catch.
+SAME_FRAME_FLAG = 0.08
 
 
 def compare(vr_pic, flat_pic):
@@ -121,11 +121,27 @@ def scene_moves(first, again):
     return float(changed.sum() / max(lit.sum(), 1))
 
 
-def same_frame(eye, rect, hud_rgb, hud_alpha, game):
+def same_frame(eye, rect, hud_rgb, hud_alpha, game, view=None):
     """A 3D frame as the headset shows it against the game's own view of the same frame: `eye`
     cropped to `rect` (where the game camera's view lands in it, clamped to the image), with the
     HUD (premultiplied colour and its alpha, game-frame shaped) laid over, compared with `game`.
-    (None, None) when the clamped crop keeps less than MIN_CROP of `rect`."""
+    `view` = the game's viewport (x, y, w, h) and the band it shows (left, top, right, bottom),
+    in `game`'s pixels: cutscenes draw their shot into a letterboxed band, which the eyes stretch
+    over the whole view, so only the band is compared. (None, None) when the clamped crop keeps
+    less than MIN_CROP of `rect`."""
+    if view:
+        vx, vy, vw, vh, bl, bt, br, bb = view
+        bl, bt, br, bb = max(bl, vx), max(bt, vy), min(br, vx + vw), min(bb, vy + vh)
+        if vw <= 0 or vh <= 0 or br <= bl or bb <= bt:
+            return None, None
+        l, t, r, b = rect
+        rect = (round(l + (bl - vx) / vw * (r - l)), round(t + (bt - vy) / vh * (b - t)),
+                round(l + (br - vx) / vw * (r - l)), round(t + (bb - vy) / vh * (b - t)))
+        if hud_rgb is not None and hud_alpha is not None:
+            sx, sy = hud_rgb.width / game.width, hud_rgb.height / game.height
+            hbox = (round(bl * sx), round(bt * sy), round(br * sx), round(bb * sy))
+            hud_rgb, hud_alpha = hud_rgb.crop(hbox), hud_alpha.crop(hbox)
+        game = game.crop((bl, bt, br, bb))
     l, t, r, b = rect
     w, h = eye.size
     cl, ct, cr, cb = max(l, 0), max(t, 0), min(r, w), min(b, h)

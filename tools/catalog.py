@@ -55,7 +55,7 @@ def parse_run(log_path):
         m = re.search(r"\] screen: (.*)$", line)
         if m:
             screens.append({"name": m.group(1).strip(), "pair": None, "shot": None, "kind": None,
-                            "tan": None, "rect": None, "sweep": [], "checks": pending})
+                            "tan": None, "rect": None, "view": None, "sweep": [], "checks": pending})
             pending = []
             continue
         m = re.search(r"\] expect (\S+): (pass|FAIL)(?:: (.*?))? \((.*)\)$", line)
@@ -75,6 +75,10 @@ def parse_run(log_path):
             r = re.search(r"; game view in left eye (-?\d+) (-?\d+) (-?\d+) (-?\d+)", line)
             if r:
                 cur["rect"] = tuple(int(v) for v in r.groups())
+            v = re.search(r"; game viewport (-?[\d.]+) (-?[\d.]+) ([\d.]+) ([\d.]+) band (-?\d+) (-?\d+) (-?\d+) (-?\d+)"
+                          r" of (\d+) (\d+)", line)
+            if v:
+                cur["view"] = tuple(float(x) for x in v.groups())
             continue
         m = re.search(r"\] sweep (\d+) yaw (-?[\d.]+) pitch (-?[\d.]+): draws (\d+)", line)
         if m:  # (a sweep belongs to the screen before it; "not 3D" directions are left out)
@@ -209,8 +213,13 @@ def build(game, out):
         if n is not None and s["kind"] == "3D" and s["rect"]:
             eye, game = load(vr_run / f"pair_{n:03d}_L.png"), load(vr_run / f"pair_{n:03d}_game.png")
             if eye is not None and game is not None:
+                view = None
+                if s["view"]:  # the game's viewport and letterbox band, in its frame -> the picture's pixels
+                    *vb, fw, fh = s["view"]
+                    sx, sy = game.width / fw, game.height / fh
+                    view = tuple(round(x * (sx if i % 2 == 0 else sy)) for i, x in enumerate(vb))
                 e["same_frame"], diff_map = same_frame(eye, s["rect"], load(vr_run / f"pair_{n:03d}_hud.png"),
-                                                       load(vr_run / f"pair_{n:03d}_hud_alpha.png"), game)
+                                                       load(vr_run / f"pair_{n:03d}_hud_alpha.png"), game, view)
                 if diff_map is not None:
                     name = save_jpg(diff_map, img / f"{key}-differences-from-game-view.jpg", 800)
                     e["images"].append(("Differences from the game's own view", name))

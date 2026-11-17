@@ -72,6 +72,23 @@ def shifted_left(a, px):
     return b
 
 
+class SameFrameLetterboxTest(unittest.TestCase):
+    def test_same_frame_letterboxed_game_view(self):
+        # A cutscene: the game draws its 640x480 shot into a band 640x360 from y=60 (dark bars
+        # above and below); the eye shows the whole shot. Compared within the band they match.
+        shot = picture()
+        game = Image.new("RGB", (640, 480), (60, 10, 10))
+        game.paste(shot.resize((640, 360), Image.BOX), (0, 60))
+        rect = (100, 100, 300, 250)
+        eye = eye_with(shot, rect)
+        view = (0, 60, 640, 360, 0, 60, 640, 420)  # viewport x y w h, band left top right bottom
+        share, _ = imagechecks.same_frame(eye, rect, None, None, game, view)
+        self.assertLess(share, 0.01)
+        # Without the band the bars and the squeeze make it differ.
+        share_full, _ = imagechecks.same_frame(eye, rect, None, None, game)
+        self.assertGreater(share_full, 0.05)
+
+
 class HeadLockedTest(unittest.TestCase):
     def test_head_locked_world_scene(self):
         a = textured()

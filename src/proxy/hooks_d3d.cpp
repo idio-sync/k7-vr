@@ -322,6 +322,12 @@ static std::unordered_map<ID3D11View*, ID3D11View*> g_twin_views;     // game vi
 
 static bool g_frame_3d;              // a perspective draw went into the scene target this frame
 static bool g_prev_frame_3d;         // ...and the frame before it
+// The game's own viewport for this frame's 3D scene (the largest a perspective draw used) and the
+// band its scissor shows: cutscenes draw a letterboxed band, which the eyes fill (fill_eye). For
+// the pair log (tools\catalog.py compares that band with the eye).
+static D3D11_VIEWPORT g_scene_vp;
+static D3D11_RECT g_scene_band;
+static bool g_scene_vp_set;
 // Menu screens over the 3D scene (the pause menu and its pages) are built from many untextured 2D
 // quads (panels, frames, the dim) among the textured artwork: 32 a frame, against 1-3 (fades,
 // letterbox bars) in gameplay and cutscenes and up to 14 with LT held (the eye icon's view).
@@ -1944,6 +1950,21 @@ static void draw_stereo(DrawFn draw) {
         g_frame_3d = true;
         D3D11_TEXTURE2D_DESC sd;
         g_scene_tex = texture_of(rtv[0], &sd);
+        if (scale.active && scale.nvp &&
+            (!g_scene_vp_set || scale.vp[0].Width * scale.vp[0].Height > g_scene_vp.Width * g_scene_vp.Height)) {
+            const D3D11_VIEWPORT& v = scale.vp[0];
+            g_scene_vp = v;
+            g_scene_band = {LONG(v.TopLeftX), LONG(v.TopLeftY), LONG(v.TopLeftX + v.Width), LONG(v.TopLeftY + v.Height)};
+            ID3D11RasterizerState* rs = nullptr;
+            g_ctx->RSGetState(&rs);
+            if (rs) {
+                D3D11_RASTERIZER_DESC rd;
+                rs->GetDesc(&rd);
+                rs->Release();
+                if (rd.ScissorEnable && scale.nsr) g_scene_band = scale.sr[0];
+            }
+            g_scene_vp_set = true;
+        }
     }
     const bool eye_image = scene && kind == 2 && samples_eye_image();
     if (eye_image && !g_frame_3d && g_prev_frame_3d) {
@@ -2910,6 +2931,15 @@ static void end_frame(IDXGISwapChain* sc) {
                 else
                     view_rect += "; game view in left eye unbounded";
             }
+            // The camera behind this frame: the FOV the game meant (fov_inflate) and the vertical
+            // tangent of the last perspective projection it wrote (the inflated one when inflating).
+            if (g_frame_3d)
+                appendf(view_rect, "; game fov %.1f, game proj tan y %.4f, gv tan y %.4f", fov_inflate_intended(),
+                        g_last_proj[5] ? 1 / g_last_proj[5] : 0.f, g_gv_tan[1]);
+            if (g_frame_3d && g_scene_vp_set)
+                appendf(view_rect, "; game viewport %.0f %.0f %.0f %.0f band %ld %ld %ld %ld of %u %u", g_scene_vp.TopLeftX,
+                        g_scene_vp.TopLeftY, g_scene_vp.Width, g_scene_vp.Height, g_scene_band.left, g_scene_band.top,
+                        g_scene_band.right, g_scene_band.bottom, g_orig_w, g_orig_h);
             logf("pair %u written (%s frame%s; eye tangents x %.4f y %.4f%s)", g_pair_index++,
                  menu ? "menu" : g_frame_3d ? "3D" : "2D", g_final[1] || !left ? "" : ", right eye had no twin",
                  g_eyes[0].px[0] ? 1 / g_eyes[0].px[0] : 0.f, g_eyes[0].py[1] ? 1 / g_eyes[0].py[1] : 0.f,
@@ -2930,6 +2960,7 @@ static void end_frame(IDXGISwapChain* sc) {
         }
         g_prev_frame_3d = g_frame_3d;
         g_frame_3d = false;
+        g_scene_vp_set = false;
         g_menu_quads = 0;
         g_final[0] = g_final[1] = nullptr;
         g_scene_tex = nullptr;

@@ -138,8 +138,8 @@ when that folder exists).
   screens that differ from VR off, and 3D screens whose look-around shows parts fixed to the
   view, something in one eye only, or scenery dropped when turning (where a set simply ends
   isn't detected: that's for people to spot in the strip). 3D screens
-  are also compared with the game's own view of the same frame, shown as a score only (it
-  doesn't yet tell right from wrong reliably). Checks: `python -m unittest discover -s tests`.
+  are also compared with the game's own view of the same frame (cutscenes within their letterbox
+  band) and flagged over 8%. Checks: `python -m unittest discover -s tests`.
 - `tools\run.ps1` / `-Stop` / `-Normal` start and stop the copy.
 - `tools\cmd.ps1 'key SPACE' 'wait 2000' 'shot'` or `tools\cmd.ps1 -File tools\scripts\new_game.txt`
   sends commands; the list is at the top of `src\proxy\control.cpp` (input, screenshots, stereo
