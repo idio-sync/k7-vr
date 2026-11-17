@@ -286,6 +286,9 @@ void begin_frame(float game_xy_ratio, EyeConsts eyes[2]) {
 
 static bool uav_capable(DXGI_FORMAT f);
 
+static unsigned g_textures_made;
+unsigned textures_made() { return g_textures_made; }
+
 // Our own texture shaped like `like` (shader resource, plus UAV for de-striping when the format
 // allows), recreated when the shape changes.
 static bool ensure_like(ID3D11Texture2D*& t, ID3D11Texture2D* like) {
@@ -306,7 +309,9 @@ static bool ensure_like(ID3D11Texture2D*& t, ID3D11Texture2D* like) {
     d.CPUAccessFlags = 0;
     d.MiscFlags = 0;
     if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &t))) return false;
-    logf("vr: texture %ux%u f%d", d.Width, d.Height, d.Format);
+    ++g_textures_made;
+    if (g_textures_made <= 50) logf("vr: texture %ux%u f%d", d.Width, d.Height, d.Format);
+    if (g_textures_made == 50) logf("vr: 50 textures made; not logging more");
     return true;
 }
 
@@ -420,12 +425,21 @@ struct Panel {
     bool opaque;
     ::vr::VROverlayHandle_t handle = ::vr::k_ulOverlayHandleInvalid;
     ID3D11Texture2D* copy = nullptr;
-    bool shown = false;
+    bool showing = false;  // has a picture this frame (sim too)
+    bool shown = false;    // the SteamVR overlay is visible
 };
 static Panel g_hud_panel{"k7vr.hud", "Killer7 VR HUD", 1.4f, 2.0f, 0.1f, false};
 static Panel g_screen_panel{"k7vr.screen", "Killer7 VR screen", 3.2f, 3.0f, 0.0f, true};
 
 static void update_panel(Panel& p, ID3D11Texture2D* src) {
+    // The panel's own copy is made in sim too, so `pair` and `expect` see what a headset would get.
+    p.showing = false;
+    if (src && src != p.copy) {
+        if (!ensure_like(p.copy, src)) src = nullptr;
+        else g_ctx->CopySubresourceRegion(p.copy, 0, 0, 0, 0, src, 0, nullptr);
+    }
+    p.showing = src != nullptr;
+    if (g_mode != Mode::OpenVR) return;
     auto overlay = ::vr::VROverlay();
     if (!overlay) return;
     if (!src) {
@@ -443,10 +457,6 @@ static void update_panel(Panel& p, ID3D11Texture2D* src) {
         else  // the HUD's colour is already multiplied by its alpha (see draw_hud)
             overlay->SetOverlayFlag(p.handle, ::vr::VROverlayFlags_IsPremultiplied, true);
         overlay->SetOverlayWidthInMeters(p.handle, p.width_m);
-    }
-    if (src != p.copy) {
-        if (!ensure_like(p.copy, src)) return;
-        g_ctx->CopySubresourceRegion(p.copy, 0, 0, 0, 0, src, 0, nullptr);
     }
     D3D11_TEXTURE2D_DESC d;
     src->GetDesc(&d);  // the picture inside is 4:3 even when the texture was resized for the eyes
@@ -473,18 +483,22 @@ void present(ID3D11Texture2D* left, ID3D11Texture2D* right, ID3D11Texture2D* hud
         eyes[1] = g_submitted[1] = g_eye_tex[1];
     }
     if (screen && prepare(g_screen_tex, screen)) screen = g_submitted[2] = g_screen_tex;
-    if (g_mode != Mode::OpenVR) return;  // sim: prepared for the pair captures only
-    for (int eye = 0; eye < 2; ++eye) {
-        ::vr::Texture_t tex{eyes[eye], ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
-        const ::vr::EVRCompositorError e = ::vr::VRCompositor()->Submit(::vr::EVREye(eye), &tex);
-        static int errors;
-        if (e != ::vr::VRCompositorError_None && errors++ < 10) logf("vr: Submit eye %d -> %d", eye, int(e));
+    if (g_mode == Mode::OpenVR) {  // sim: everything up to here, for the pair captures and `expect`
+        for (int eye = 0; eye < 2; ++eye) {
+            ::vr::Texture_t tex{eyes[eye], ::vr::TextureType_DirectX, ::vr::ColorSpace_Gamma};
+            const ::vr::EVRCompositorError e = ::vr::VRCompositor()->Submit(::vr::EVREye(eye), &tex);
+            static int errors;
+            if (e != ::vr::VRCompositorError_None && errors++ < 10) logf("vr: Submit eye %d -> %d", eye, int(e));
+        }
     }
     update_panel(g_hud_panel, g_show_hud ? hud : nullptr);
     update_panel(g_screen_panel, g_show_screen ? screen : nullptr);
 }
 
-ID3D11Texture2D* panel_texture(int which) { return which == 0 ? g_hud_panel.copy : g_screen_panel.copy; }
+ID3D11Texture2D* panel_texture(int which) {
+    const Panel& p = which == 0 ? g_hud_panel : g_screen_panel;
+    return p.showing ? p.copy : nullptr;
+}
 
 void set_panels(bool hud, bool screen) {
     g_show_hud = hud;

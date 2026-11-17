@@ -118,7 +118,14 @@ when that folder exists).
 
 - `tools\install.ps1` installs into the copy (refuses Steam folders) and seeds its private profile.
 - `tools\profile.ps1 test|playtest|sim` switches the copy's `k7vr.ini`: unattended (minimized,
-  muted, scripted input, VR off), headset playtest, or the simulated headset.
+  muted, scripted input, VR off), headset playtest, or the simulated headset (its eye targets
+  resized like a headset's, 2048x2048, so the copies to the eyes and panels run as in a headset).
+- `tools\check.ps1` checks what a headset would be handed, in the simulated headset (about 5
+  minutes, exit code 1 on a failure): boot, a cutscene, play, LT held, the pause menu and its
+  Smiths page, back in play. Each step of `tools\scripts\check_vr.txt` that says `expect 3d|menu|2d`
+  checks which way the frames went, that the hand-off didn't keep making textures, and that what
+  the eyes or the screen panel got isn't black and matches its source. Run it before a headset
+  session; it can't judge comfort, scale, aim feel or the real controllers' bindings.
 - `tools\run.ps1` / `-Stop` / `-Normal` start and stop the copy.
 - `tools\cmd.ps1 'key SPACE' 'wait 2000' 'shot'` or `tools\cmd.ps1 -File tools\scripts\new_game.txt`
   sends commands; the list is at the top of `src\proxy\control.cpp` (input, screenshots, stereo
@@ -130,4 +137,4 @@ when that folder exists).
 
 Output lands in `<game>\k7vr\`: `k7vr.log`, `status.txt`, `shot_*.png`, `capture_*` (per-draw
 lists and snapshots), `pair_*` (both eyes as sent to the headset, the raw scene, HUD, screen,
-the game's own view).
+the panels' own copies, the game's own view), `check.log` (the last `tools\check.ps1` run).

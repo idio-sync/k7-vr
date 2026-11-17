@@ -11,6 +11,9 @@
 //                           textures handed to the HUD and screen panels)
 //   panels HUD SCREEN       show (1) or hide (0) the HUD and screen overlay panels (OpenVR)
 //   hudlog [N]              log the draws that go to the HUD overlay for N frames (default 1)
+//   expect 3d|menu|2d|any [ms]  check the next ms (default 1000) of frames as the headset gets them,
+//                           while the following steps run; logs "expect ...: pass" or "FAIL ..."
+//   mark text               log line when the step's turn comes (tools\check.ps1 waits on these)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
 //   dumpf ADDR N [TAG] / dumpptr PTR OFF N TAG   log N floats (memscan.cpp)
@@ -317,6 +320,19 @@ static void run_line(const std::string& line) {
         int frames = 1;
         ss >> frames;
         g_steps.push_back(Step{.action = [=] { request_hud_log(frames); }});
+    } else if (cmd == "expect") {  // checks in the background while the next steps run
+        std::string kind;
+        unsigned ms = 1000;
+        ss >> kind >> ms;
+        if (kind != "3d" && kind != "menu" && kind != "2d" && kind != "any") {
+            logf("cmd: expect wants 3d, menu, 2d or any, not '%s'", kind.c_str());
+            return;
+        }
+        g_steps.push_back(Step{.action = [=] { request_expect(kind, ms); }});
+    } else if (cmd == "mark") {  // a log line when this step's turn comes (`log` writes at once)
+        std::string rest;
+        std::getline(ss, rest);
+        g_steps.push_back(Step{.action = [=] { logf("mark:%s", rest.c_str()); }});
     } else if (cmd == "aimtrace") {
         int frames = 30;
         ss >> frames;

@@ -310,6 +310,7 @@ static bool g_frame_3d;              // a perspective draw went into the scene t
 constexpr int kMenuQuads = 24;
 static int g_menu_quads;             // untextured 2D quads drawn into the eyes after the scene this frame
 static bool g_menu_shown;            // the last frame went to the screen panel as a menu (logs changes)
+static unsigned g_eye_targets_made;  // the game's 4:3 targets made at the eye size (hk_CreateTexture2D)
 static ID3D11Texture2D* g_scene_tex; // the scene target of this frame's last perspective draw (diagnostics)
 static ID3D11Texture2D* g_final[2];  // each eye's final image (the texture the game blits to the window)
 static ID3D11Texture2D* g_hud_tex;
@@ -1609,7 +1610,9 @@ static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11
             g_orig_w = desc->Width;
             g_orig_h = desc->Height;
             vr::set_content_aspect(float(desc->Width) / float(desc->Height));
-            logf("eye targets: %ux%u f%d created at %ux%u", desc->Width, desc->Height, desc->Format, w, h);
+            if (++g_eye_targets_made <= 50)
+                logf("eye targets: %ux%u f%d created at %ux%u", desc->Width, desc->Height, desc->Format, w, h);
+            if (g_eye_targets_made == 50) logf("eye targets: 50 made; not logging more");
             if (!o_Tex2DGetDesc) {  // all 2D textures share the vtable: hook once
                 patch_vtbl(*out, vt::tex2d_GetDesc, reinterpret_cast<void*>(&hk_Tex2DGetDesc),
                            reinterpret_cast<void**>(&o_Tex2DGetDesc));
@@ -2420,9 +2423,14 @@ static Present_t o_Present;
 static Present1_t o_Present1;
 
 // alpha_only: write the alpha channel as greyscale (RGBA8 textures), to check overlay transparency.
-static void save_texture(ID3D11Texture2D* tex, const std::wstring& path, bool alpha_only = false) {
+// A texture read back as 8-bit BGRA rows, alpha 255 (alpha_only: the alpha as grey). False for
+// formats it doesn't handle (logged).
+static bool read_bgra(ID3D11Texture2D* tex, bool alpha_only, std::vector<uint8_t>& px, UINT* width, UINT* height) {
+    bool read = false;
     D3D11_TEXTURE2D_DESC d;
     tex->GetDesc(&d);
+    *width = d.Width;
+    *height = d.Height;
     ID3D11Texture2D* src = tex;
     ID3D11Texture2D* resolved = nullptr;
     if (d.SampleDesc.Count > 1) {
@@ -2447,7 +2455,7 @@ static void save_texture(ID3D11Texture2D* tex, const std::wstring& path, bool al
         g_ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, src, 0, nullptr);
         D3D11_MAPPED_SUBRESOURCE m;
         if (SUCCEEDED(g_ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
-            std::vector<uint8_t> px(size_t(d.Width) * d.Height * 4);
+            px.assign(size_t(d.Width) * d.Height * 4, 0);
             bool ok = true;
             for (UINT y = 0; y < d.Height && ok; ++y) {
                 auto row = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
@@ -2484,14 +2492,153 @@ static void save_texture(ID3D11Texture2D* tex, const std::wstring& path, bool al
                 }
             }
             g_ctx->Unmap(staging, 0);
-            if (ok)
-                save_png(path, d.Width, d.Height, d.Width * 4, px.data());
-            else
-                logf("screenshot: format %d not handled", d.Format);
+            read = ok;
+            if (!ok) logf("readback: format %d not handled", d.Format);
         }
         staging->Release();
     }
     if (resolved) resolved->Release();
+    return read;
+}
+
+static void save_texture(ID3D11Texture2D* tex, const std::wstring& path, bool alpha_only = false) {
+    std::vector<uint8_t> px;
+    UINT w = 0, h = 0;
+    if (read_bgra(tex, alpha_only, px, &w, &h)) save_png(path, w, h, w * 4, px.data());
+}
+
+// Mean brightness 0..1 (every 4th pixel each way), or -1 when it can't be read.
+static float mean_level(ID3D11Texture2D* tex) {
+    std::vector<uint8_t> px;
+    UINT w = 0, h = 0;
+    if (!tex || !read_bgra(tex, false, px, &w, &h)) return -1;
+    double sum = 0;
+    unsigned n = 0;
+    for (UINT y = 0; y < h; y += 4)
+        for (UINT x = 0; x < w; x += 4, ++n) {
+            const uint8_t* p = &px[(size_t(y) * w + x) * 4];
+            sum += p[0] + p[1] + p[2];
+        }
+    return n ? float(sum / (n * 3.0 * 255.0)) : -1;
+}
+
+static bool same_size(ID3D11Texture2D* a, ID3D11Texture2D* b, std::string* why, const char* what) {
+    D3D11_TEXTURE2D_DESC da, db;
+    a->GetDesc(&da);
+    b->GetDesc(&db);
+    if (da.Width == db.Width && da.Height == db.Height) return true;
+    appendf(*why, "; %s %ux%u, its source %ux%u", what, da.Width, da.Height, db.Width, db.Height);
+    return false;
+}
+
+// `expect KIND MS` (control.cpp): how the next MS of frames went to the headset, as the
+// headset gets them (sim mode makes the same copies). KIND 3d: eye images; menu: the game view
+// on the screen panel over a 3D scene (see kMenuQuads); 2d: a 2D frame on the screen panel;
+// any: the other checks only. FAIL when under 90% of the frames were KIND, when the hand-off
+// kept making textures (a picture that changes shape every frame), or when, halfway through,
+// what the headset gets is black, isn't its source's size, or the screen panel's copy doesn't
+// match the screen image.
+static SRWLOCK g_expect_lock = SRWLOCK_INIT;
+static std::string g_expect_next;  // from the pad thread or this one; taken at the end of a frame
+static unsigned g_expect_next_ms;
+static struct {
+    std::string kind;  // empty: not checking
+    ULONGLONG start = 0, end = 0;
+    unsigned frames = 0, n3d = 0, nmenu = 0, n2d = 0, made0 = 0;
+    bool looked = false;
+    std::string image;     // what the halfway look measured
+    std::string problems;  // and found wrong ("; ..." each)
+} g_expect;
+
+void request_expect(const std::string& kind, unsigned ms) {
+    AcquireSRWLockExclusive(&g_expect_lock);
+    g_expect_next = kind;
+    g_expect_next_ms = ms;
+    ReleaseSRWLockExclusive(&g_expect_lock);
+}
+
+static unsigned hand_off_textures() { return vr::textures_made() + g_eye_targets_made; }
+
+static void expect_finish() {
+    auto& e = g_expect;
+    const unsigned made = hand_off_textures() - e.made0;
+    const unsigned of_kind = e.kind == "3d" ? e.n3d : e.kind == "menu" ? e.nmenu : e.kind == "2d" ? e.n2d : e.frames;
+    std::string why;
+    if (!e.frames) why += "; no frames";
+    else if (of_kind * 10 < e.frames * 9) appendf(why, "; only %u of %u frames were %s", of_kind, e.frames, e.kind.c_str());
+    if (made > 2) appendf(why, "; %u textures made (the hand-off remade them)", made);
+    if (!e.looked) why += "; no frame looked at";
+    why += e.problems;
+    logf("expect %s: %s%s (%u frames: 3D %u, menu %u, 2D %u; %u textures made; %s)", e.kind.c_str(),
+         why.empty() ? "pass" : "FAIL: ", why.empty() ? "" : why.c_str() + 2, e.frames, e.n3d, e.nmenu, e.n2d, made,
+         e.image.c_str());
+    e.kind.clear();
+}
+
+// A picture that was never drawn into reads as all zeros; the darkest real screen seen (the
+// language select) averages 0.013.
+constexpr float kBlack = 0.003f;
+
+// Halfway through: what this frame handed to the headset.
+static void expect_look(bool eyes, ID3D11Texture2D* left, ID3D11Texture2D* screen) {
+    auto& e = g_expect;
+    e.looked = true;
+    e.image.clear();
+    std::string& why = e.problems;
+    why.clear();
+    if (eyes) {
+        ID3D11Texture2D* l = vr::submitted(0);
+        ID3D11Texture2D* r = vr::submitted(1);
+        if (!l || !r) {
+            e.image = "no eye images", why = "; the eyes weren't submitted";
+            return;
+        }
+        const float ml = mean_level(l), mr = mean_level(r);
+        appendf(e.image, "eyes %.3f/%.3f", ml, mr);
+        if (ml < kBlack || mr < kBlack) why += "; an eye is black";
+        same_size(l, left, &why, "left eye");
+        if (vr::panel_texture(1)) why += "; the screen panel shows too";
+    } else {
+        ID3D11Texture2D* sent = vr::submitted(2);
+        ID3D11Texture2D* panel = vr::panel_texture(1);
+        if (!sent || !panel) {
+            e.image = "no screen image";
+            why = !sent ? "; no screen image was prepared" : "; the screen panel is hidden";
+            return;
+        }
+        const float ms = mean_level(sent), mp = mean_level(panel);
+        appendf(e.image, "screen %.3f, panel %.3f", ms, mp);
+        if (mp < kBlack) why += "; the screen panel is black";
+        if (fabsf(mp - ms) > 0.02f) why += "; the screen panel doesn't match the screen image";
+        same_size(sent, screen, &why, "screen image");
+        same_size(panel, sent, &why, "screen panel");
+        if (vr::submitted(0)) why += "; the eyes show too";
+    }
+}
+
+// Once per frame after the hand-off. kind: 0 3D, 1 menu, 2 2D.
+static void expect_frame(int kind, ID3D11Texture2D* left, ID3D11Texture2D* screen) {
+    auto& e = g_expect;
+    std::string next;
+    unsigned next_ms = 0;
+    AcquireSRWLockExclusive(&g_expect_lock);
+    next.swap(g_expect_next);
+    next_ms = g_expect_next_ms;
+    ReleaseSRWLockExclusive(&g_expect_lock);
+    const ULONGLONG now = GetTickCount64();
+    if (!next.empty()) {
+        if (!e.kind.empty()) expect_finish();  // cut short by the next one
+        e = {};
+        e.kind = next;
+        e.start = now;
+        e.end = now + next_ms;
+        e.made0 = hand_off_textures();
+    }
+    if (e.kind.empty()) return;
+    ++e.frames;
+    (kind == 0 ? e.n3d : kind == 1 ? e.nmenu : e.n2d)++;
+    if (!e.looked && now >= e.start + (e.end - e.start) / 2) expect_look(kind == 0, left, screen);
+    if (now >= e.end) expect_finish();
 }
 
 // The frame image: the final blit's source if one was seen this frame, else the backbuffer.
@@ -2588,8 +2735,8 @@ static void end_frame(IDXGISwapChain* sc) {
             else if (g_draws_last == 0) ++n2d_empty;
             else ++n2d;
             if (GetTickCount64() - t0 >= 5000) {
-                logf("frames: 3D %u, menu %u, 2D %u, 2D without draws %u; most 2D quads %d", n3d, nmenu, n2d,
-                     n2d_empty, most_quads);
+                logf("frames: 3D %u, menu %u, 2D %u, 2D without draws %u; most 2D quads %d; textures made %u", n3d,
+                     nmenu, n2d, n2d_empty, most_quads, hand_off_textures());
                 n3d = nmenu = n2d = n2d_empty = 0;
                 most_quads = 0;
                 t0 = GetTickCount64();
@@ -2643,7 +2790,7 @@ static void end_frame(IDXGISwapChain* sc) {
                 save_texture(hud, path_in(name), true);
             }
             for (int p = 0; p < 2; ++p)
-                if (ID3D11Texture2D* t = vr::mode() == vr::Mode::OpenVR ? vr::panel_texture(p) : nullptr) {
+                if (ID3D11Texture2D* t = vr::panel_texture(p)) {
                     swprintf(name, 64, p ? L"pair_%03u_panel_screen.png" : L"pair_%03u_panel_hud.png", g_pair_index);
                     save_texture(t, path_in(name));
                     swprintf(name, 64, p ? L"pair_%03u_panel_screen_alpha.png" : L"pair_%03u_panel_hud_alpha.png",
@@ -2657,6 +2804,7 @@ static void end_frame(IDXGISwapChain* sc) {
             logf("pair %u written (%s frame%s)", g_pair_index++, menu ? "menu" : g_frame_3d ? "3D" : "2D",
                  g_final[1] || !left ? "" : ", right eye had no twin");
         }
+        expect_frame(menu ? 1 : left ? 0 : 2, left, screen);
         g_frame_3d = false;
         g_menu_quads = 0;
         g_final[0] = g_final[1] = nullptr;
