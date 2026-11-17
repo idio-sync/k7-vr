@@ -75,6 +75,7 @@ def head_locked(straight, turned, shift_px):
         moved = np.minimum(moved, _cells(diff))
     margin = CELL_DIFF / 3
     lit = _cells(a) > 0.02
+    lit[:, : -(-2 * s0 // 4)] = False  # the strip the world moves in from: nothing to match where it went
     locked = lit & (stay < margin) & (moved - stay > margin)
     world = lit & (moved < margin) & (stay - moved > margin)
     return float(locked.sum() / max((locked | world).sum(), 1))

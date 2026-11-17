@@ -105,6 +105,16 @@ class HeadLockedPerspectiveTest(unittest.TestCase):
         self.assertLess(imagechecks.head_locked(Image.fromarray(a), Image.fromarray(b), 18), 0.05)
 
 
+class HeadLockedEdgeTest(unittest.TestCase):
+    def test_head_locked_flat_world(self):
+        # A flat grey world turning: the strip the world moves in from at the left edge has
+        # nothing to match where the world went, but that doesn't make it fixed to the view.
+        a = np.full((300, 400, 3), 128, np.uint8)
+        b = shifted_left(a, 18)
+        b[:, 400 - 18:] = 128  # (flat: what comes in from the right looks the same)
+        self.assertLess(imagechecks.head_locked(Image.fromarray(a), Image.fromarray(b), 18), 0.05)
+
+
 class OneEyeTest(unittest.TestCase):
     def test_one_eye_disparity_ok(self):
         left = textured()

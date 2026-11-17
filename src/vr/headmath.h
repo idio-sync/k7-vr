@@ -52,4 +52,10 @@ void projection_rows(float left, float right, float bottom, float top, float out
 void frustum_scissor(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y, int width,
                      int height, int out[4]);
 
+// The same rectangle without clamping to the image (edges may be negative or past width/height),
+// for comparing the eye with the game's own view. False when a frustum corner is at or behind
+// the eye plane (no bounded rectangle).
+bool frustum_rect_unclamped(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y,
+                            int width, int height, int out[4]);
+
 }  // namespace k7::vr

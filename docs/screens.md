@@ -164,10 +164,6 @@ A 3D scene (curtains, the pigeon). The set only covers the original framing: abo
 third of the wider VR view is black. A case of looking where the flat camera never points: the
 look-around strip shows how far it goes (no check detects it; the set is dark by design).
 
-The look-around flags it as fixed to the view (about 25%). Most likely a false flag: the
-curtains are rows of repeating vertical stripes, which match themselves after a small turn.
-The strip's views show the curtains moving with the world at 45 and 90 degrees.
-
 ## Blood page
 Status: ok
 

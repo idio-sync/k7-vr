@@ -154,7 +154,32 @@ static void test_world_lock_keeps_world_still() {
     }
 }
 
+static void test_frustum_rect_unclamped() {
+    float head[12];
+    float px[4], py[4];
+    int r[4];
+    projection_rows(-0.6f, 0.6f, -0.5f, 0.5f, px, py);
+    // Head turned 30 degrees right: the game frustum's left edge (-31 deg) lands far left of the
+    // image (negative pixels), its right edge (+31 deg) just right of the centre.
+    eye_space_transform(rotation_yaw_pitch(0.5236f, 0), 0.25f, head);
+    if (!frustum_rect_unclamped(head, px, py, 0.6f, 0.5f, 1920, 1440, r)) {
+        std::printf("turned 30: frustum_rect_unclamped said unbounded\n");
+        ++g_failures;
+    }
+    const double left = std::tan(std::atan(-0.6) - 0.5236) / 0.6;
+    const double right = std::tan(std::atan(0.6) - 0.5236) / 0.6;
+    CHECK_NEAR(r[0], (left * 0.5 + 0.5) * 1920, 2);
+    CHECK_NEAR(r[2], (right * 0.5 + 0.5) * 1920, 2);
+    // Head turned 120 degrees: corners behind the eye, no bounded rectangle.
+    eye_space_transform(rotation_yaw_pitch(2.1f, 0), 0.25f, head);
+    if (frustum_rect_unclamped(head, px, py, 0.6f, 0.5f, 1920, 1440, r)) {
+        std::printf("turned 120: frustum_rect_unclamped gave a rect\n");
+        ++g_failures;
+    }
+}
+
 int main() {
+    test_frustum_rect_unclamped();
     test_aim_angles_match_probe();
     test_world_lock_keeps_world_still();
     test_frustum_scissor();

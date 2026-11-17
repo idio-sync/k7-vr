@@ -287,6 +287,7 @@ constexpr UINT kMaxTargets = 4;
 constexpr UINT kMaxTextures = 8;
 static ID3D11Buffer* g_eye_cb[2];  // left, right
 static ID3D11Buffer* g_gv_cb;      // game-view pass (vr::game_view)
+static float g_gv_tan[2];          // its frustum's half-angle tangents this frame (x, y; 0: not replaced)
 static ID3D11Buffer* g_draw_cb[2];  // slot b13 per-draw transform: [0] none, [1] first-person arm and gun
 constexpr UINT kDrawSlot = 13;
 static bool g_aim_mode;             // the game's first-person aim camera is active this frame
@@ -1196,6 +1197,10 @@ static void set_eye_offsets() {
         vr::EyeConsts gv;
         vr::game_view(ratio, &gv);
         g_ctx->UpdateSubresource(g_gv_cb, 0, nullptr, &gv, 0, 0);
+        // The frustum this frame's game view is drawn with (the pair log places it in the eye;
+        // the camera's FOV can change later in the frame).
+        g_gv_tan[0] = gv.flags[0] && gv.px[0] ? 1 / gv.px[0] : 0;
+        g_gv_tan[1] = gv.flags[0] && gv.py[1] ? 1 / gv.py[1] : 0;
     }
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 }
@@ -2816,10 +2821,15 @@ static void end_frame(IDXGISwapChain* sc) {
             std::string view_rect;
             int r[4];
             D3D11_TEXTURE2D_DESC ld;
-            if (left && vr::submitted(0)) {
+            if (left && vr::submitted(0) && g_gv_tan[0] > 0) {
+                // Unclamped (it may reach past the eye image), with the tangents the game view
+                // was drawn with this frame.
                 vr::submitted(0)->GetDesc(&ld);
-                if (game_view_in_eye(0, int(ld.Width), int(ld.Height), r))
+                if (vr::frustum_rect_unclamped(g_eyes[0].head, g_eyes[0].px, g_eyes[0].py, g_gv_tan[0], g_gv_tan[1],
+                                               int(ld.Width), int(ld.Height), r))
                     appendf(view_rect, "; game view in left eye %d %d %d %d", r[0], r[1], r[2], r[3]);
+                else
+                    view_rect += "; game view in left eye unbounded";
             }
             logf("pair %u written (%s frame%s; eye tangents x %.4f y %.4f%s)", g_pair_index++,
                  menu ? "menu" : g_frame_3d ? "3D" : "2D", g_final[1] || !left ? "" : ", right eye had no twin",
