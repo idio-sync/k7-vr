@@ -49,7 +49,7 @@ finally {
     if (Test-Path $keep) { Remove-Item $keep -Recurse -Force }
     New-Item -ItemType Directory -Force $keep | Out-Null
     if (Test-Path $log) { Copy-Item $log (Join-Path $keep 'k7vr.log') }
-    Get-ChildItem $k7 -File | Where-Object Name -match '^(shot_\d+|pair_\d+_\w+)\.png$' | Move-Item -Destination $keep
+    Get-ChildItem $k7 -File | Where-Object Name -match '^(shot_\d+|pair_\d+_\w+|sweep_\d+_L)\.png$' | Move-Item -Destination $keep
 }
 
 $shot = @(Select-String -Path (Join-Path $keep 'k7vr.log') -Pattern '\] screen: ').Count

@@ -35,6 +35,72 @@ def compare(vr_pic, flat_pic):
     return float(off.mean()), Image.fromarray(base.astype(np.uint8))
 
 
+# Look-around (`sweep`). A screen is flagged when over HEAD_LOCKED_FLAG of its picture stays put
+# when the head turns 10 degrees, or over ONE_EYE_FLAG of the left eye has no match in the right.
+HEAD_LOCKED_FLAG = 0.15
+ONE_EYE_FLAG = 0.05
+# Pictures are compared at WORK size: GRID cells of 4x4 pixels.
+WORK = (GRID[0] * 4, GRID[1] * 4)
+
+
+def _grey(img):
+    return np.asarray(img.convert("L").resize(WORK, Image.BOX), dtype=np.float32) / 255
+
+
+def _cells(diff):
+    """Per-pixel differences at WORK size -> their mean per GRID cell."""
+    h, w = diff.shape
+    return diff[: h - h % 4, : w - w % 4].reshape(h // 4, 4, w // 4, 4).mean(axis=(1, 3))
+
+
+def head_locked(straight, turned, shift_px):
+    """Share of the picture (cells of `straight` that aren't black) that matches `turned` better
+    where it was than where the world went: `turned` is the view with the head turned right, in
+    which world-locked things moved shift_px to the left."""
+    a, b = _grey(straight), _grey(turned)
+    s = max(1, round(shift_px * WORK[0] / straight.width))
+    stay = np.abs(a - b)
+    moved = np.full_like(a, 1.0)
+    moved[:, s:] = np.abs(a[:, s:] - b[:, :-s])
+    locked = (_cells(stay) < _cells(moved)) & (_cells(stay) < CELL_DIFF)
+    lit = _cells(a) > 0.02
+    lit[:, : -(-s // 4)] = False  # the strip the world moved in from has nothing to match
+    return float((locked & lit).sum() / max(lit.sum(), 1))
+
+
+def one_eye(left, right, max_disparity_px):
+    """Share of the left eye's cells that have no match in the right eye within
+    +-max_disparity_px sideways."""
+    a, b = _grey(left), _grey(right)
+    d_max = max(1, round(max_disparity_px * WORK[0] / left.width))
+    best = np.full(_cells(a).shape, np.inf, np.float32)
+    for d in range(-d_max, d_max + 1):
+        diff = np.full_like(a, 1.0)
+        if d >= 0:
+            diff[:, : a.shape[1] - d] = np.abs(a[:, : a.shape[1] - d] - b[:, d:])
+        else:
+            diff[:, -d:] = np.abs(a[:, -d:] - b[:, : a.shape[1] + d])
+        best = np.minimum(best, _cells(diff))
+    return float((best > CELL_DIFF).mean())
+
+
+def sweep_flags(views):
+    """Flags from a sweep's {(yaw, pitch): {"draws": n, "undrawn": share}}: "culled" when a
+    direction within 45 degrees of straight ahead draws under 0.6x what straight ahead does,
+    "set ends" when any direction has over 0.25 more of its view undrawn."""
+    base = views.get((0, 0))
+    if not base:
+        return []
+    flags = []
+    if any(abs(yaw) <= 45 and (yaw, pitch) != (0, 0) and v["draws"] < 0.6 * base["draws"]
+           for (yaw, pitch), v in views.items()):
+        flags.append("culled")
+    if base["undrawn"] >= 0 and any(v["undrawn"] >= 0 and v["undrawn"] - base["undrawn"] > 0.25
+                                    for v in views.values()):
+        flags.append("set ends")
+    return flags
+
+
 def same_frame(eye, rect, hud_rgb, hud_alpha, game):
     """A 3D frame as the headset shows it against the game's own view of the same frame: `eye`
     cropped to `rect` (where the game camera's view lands in it, clamped to the image), with the

@@ -21,7 +21,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from imagechecks import FLAG_CELLS, SAME_FRAME_FLAG, compare, same_frame
+from imagechecks import (FLAG_CELLS, HEAD_LOCKED_FLAG, ONE_EYE_FLAG, SAME_FRAME_FLAG, compare, head_locked,
+                         one_eye, same_frame, sweep_flags)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -54,7 +55,7 @@ def parse_run(log_path):
         m = re.search(r"\] screen: (.*)$", line)
         if m:
             screens.append({"name": m.group(1).strip(), "pair": None, "shot": None, "kind": None,
-                            "tan": None, "rect": None, "checks": pending})
+                            "tan": None, "rect": None, "sweep": [], "checks": pending})
             pending = []
             continue
         m = re.search(r"\] expect (\S+): (pass|FAIL)(?:: (.*?))? \((.*)\)$", line)
@@ -74,6 +75,11 @@ def parse_run(log_path):
             r = re.search(r"; game view in left eye (-?\d+) (-?\d+) (-?\d+) (-?\d+)", line)
             if r:
                 cur["rect"] = tuple(int(v) for v in r.groups())
+            continue
+        m = re.search(r"\] sweep (\d+) yaw (-?[\d.]+) pitch (-?[\d.]+): draws (\d+), undrawn (-?[\d.]+)", line)
+        if m:  # (a sweep belongs to the screen before it; "not 3D" directions are left out)
+            cur["sweep"].append({"n": int(m.group(1)), "yaw": round(float(m.group(2))), "pitch": round(float(m.group(3))),
+                                 "draws": int(m.group(4)), "undrawn": float(m.group(5))})
             continue
         m = re.search(r"screenshot shot_(\d+)\.png", line)
         if m and cur["shot"] is None:
@@ -208,6 +214,7 @@ def build(game, out):
                 if diff_map is not None:
                     name = save_jpg(diff_map, img / f"{key}-differences-from-game-view.jpg", 800)
                     e["images"].append(("Differences from the game's own view", name))
+        look_around(e, s, vr_run, img, key)
         f = flat.get(s["name"].lower())
         e["flat"] = None
         e["differs"] = None  # share of cells that differ from VR off (2D and menu frames)
@@ -227,6 +234,46 @@ def build(game, out):
     return entries
 
 
+LOOK_FLAGS = {
+    "head-locked": "Parts fixed to the view",
+    "one eye": "Something in one eye only",
+    "culled": "Scenery dropped when turning",
+    "set ends": "Undrawn areas when turning",
+}
+
+
+def look_around(e, s, run, img, key):
+    """The sweep's views (a strip) and the look-around flags: head-locked parts (straight ahead
+    against 10 degrees right), one-eye parts (the pair's two eyes), culling and undrawn areas."""
+    e["sweep"], e["look_flags"] = [], []
+    views = {(v["yaw"], v["pitch"]): v for v in s["sweep"]}
+    for v in s["sweep"]:
+        name = save_jpg(load(run / f"sweep_{v['n']:03d}_L.png"), img / f"{key}-sweep-{v['n']:03d}.jpg", 400)
+        if name:
+            e["sweep"].append(dict(v, file=name))
+    straight, turned = views.get((0, 0)), views.get((10, 0))
+    if straight and turned:
+        a, b = load(run / f"sweep_{straight['n']:03d}_L.png"), load(run / f"sweep_{turned['n']:03d}_L.png")
+        if a is not None and b is not None:
+            tan_x = (s["tan"] or (DEFAULT_TAN_X, DEFAULT_TAN_Y))[0]
+            e["head_locked"] = head_locked(a, b, round(a.width * math.tan(math.radians(10)) / (2 * tan_x)))
+            if e["head_locked"] > HEAD_LOCKED_FLAG:
+                e["look_flags"].append("head-locked")
+    if s["pair"] is not None and s["kind"] == "3D":
+        left, right = load(run / f"pair_{s['pair']:03d}_L.png"), load(run / f"pair_{s['pair']:03d}_R.png")
+        if left is not None and right is not None:
+            # Eye separation shifts near things sideways; 2% of the width covers what the tour meets.
+            e["one_eye"] = one_eye(left, right, round(left.width * 0.02))
+            if e["one_eye"] > ONE_EYE_FLAG:
+                e["look_flags"].append("one eye")
+    e["look_flags"] += sweep_flags(views)
+
+
+def sweep_caption(v):
+    undrawn = "" if v["undrawn"] < 0 else f" &middot; {100 * v['undrawn']:.0f}% undrawn"
+    return f"yaw {v['yaw']:+d}&deg; pitch {v['pitch']:+d}&deg; &middot; {v['draws']} draws{undrawn}"
+
+
 def game_flagged(e):
     """Whether a 3D screen's same-frame score flags it (never while SAME_FRAME_FLAG is None)."""
     return SAME_FRAME_FLAG is not None and (e["same_frame"] or 0) > SAME_FRAME_FLAG
@@ -242,6 +289,7 @@ def page(entries, have_flat, findings=()):
     failed = sum(1 for e in entries if any(not c["pass"] for c in e["checks"]))
     differ = sum(1 for e in entries if (e["differs"] or 0) > FLAG_CELLS)
     differ_game = sum(1 for e in entries if game_flagged(e))
+    looked = sum(1 for e in entries if e["look_flags"])
     kind_label = {"3D": "3D", "menu": "Menu", "2D": "2D"}
 
     cards = []
@@ -270,6 +318,26 @@ def page(entries, have_flat, findings=()):
                        f'{"Differs from" if flagged_game else "Matches"} the game\'s own view of the same frame'
                        f'<span class="stats mono">{100 * e["same_frame"]:.1f}% of cells differ '
                        f'(flagged over {100 * SAME_FRAME_FLAG:.0f}%)</span></li>')
+        if e.get("head_locked") is not None:
+            flag = e["head_locked"] > HEAD_LOCKED_FLAG
+            checks += (f'<li class="check {"fail" if flag else "pass"}">Head turned 10&deg;: '
+                       f'{"parts stay fixed to the view" if flag else "the picture moves with the world"}'
+                       f'<span class="stats mono">{100 * e["head_locked"]:.1f}% of the picture stays put '
+                       f'(flagged over {100 * HEAD_LOCKED_FLAG:.0f}%)</span></li>')
+        if e.get("one_eye") is not None:
+            flag = e["one_eye"] > ONE_EYE_FLAG
+            checks += (f'<li class="check {"fail" if flag else "pass"}">Left eye against right eye: '
+                       f'{"parts are in one eye only" if flag else "the eyes match"}'
+                       f'<span class="stats mono">{100 * e["one_eye"]:.1f}% of the left eye has no match '
+                       f'(flagged over {100 * ONE_EYE_FLAG:.0f}%)</span></li>')
+        look_chips = "".join(f'<span class="chip status unsure">{esc(LOOK_FLAGS[f])}</span>' for f in e["look_flags"])
+        strip = "".join(
+            f'<figure class="thumb"><button class="zoom" data-src="img/{v["file"]}" aria-label="Enlarge view yaw {v["yaw"]} pitch {v["pitch"]}">'
+            f'<img src="img/{v["file"]}" alt="Head turned yaw {v["yaw"]} pitch {v["pitch"]}" loading="lazy"></button>'
+            f'<figcaption class="mono">{sweep_caption(v)}</figcaption></figure>'
+            for v in e["sweep"])
+        strip_html = (f'<section class="sweep"><h3>Looking around (the views the original never shows)</h3>'
+                      f'<div class="thumbs">{strip}</div></section>') if strip else ""
         view = (f'<figure class="main"><button class="zoom" data-src="img/{e["view"]}" aria-label="Enlarge headset view">'
                 f'<img src="img/{e["view"]}" alt="Approximate headset view of {esc(e["name"])}" loading="lazy"></button>'
                 f'<figcaption>Headset view (approximate)</figcaption></figure>') if e["view"] else \
@@ -283,7 +351,7 @@ def page(entries, have_flat, findings=()):
             f'<img src="img/{name}" alt="{esc(label)}" loading="lazy"></button><figcaption>{esc(label)}</figcaption></figure>'
             for label, name in e["images"])
         cards.append(f"""
-<article class="screen" id="s{e['n']}" data-status="{status}" data-failed="{1 if fails else 0}" data-differs="{1 if flagged else 0}" data-differs-game="{1 if flagged_game else 0}">
+<article class="screen" id="s{e['n']}" data-status="{status}" data-failed="{1 if fails else 0}" data-differs="{1 if flagged else 0}" data-differs-game="{1 if flagged_game else 0}" data-look="{1 if e['look_flags'] else 0}">
   <header class="screen-head">
     <span class="num mono">{e['n']:02d}</span>
     <h2>{esc(e['name'])}</h2>
@@ -292,17 +360,19 @@ def page(entries, have_flat, findings=()):
     {'<span class="chip status broken">Check failed</span>' if fails else ''}
     {'<span class="chip status wrong">Differs from VR off</span>' if flagged else ''}
     {'<span class="chip status wrong">Differs from the game view</span>' if flagged_game else ''}
+    {look_chips}
   </header>
   <div class="pair">{view}{flat}</div>
   <div class="detail">
     <div class="notes">{notes}{f'<ul class="checks">{checks}</ul>' if checks else ''}</div>
     <div class="thumbs">{thumbs}</div>
   </div>
+  {strip_html}
 </article>""")
 
     filters = [("all", "All", len(entries))] + [(k, v, counts[k]) for k, v in STATUSES.items()] + \
         [("unreviewed", "Not reviewed", unreviewed), ("failed", "Check failed", failed),
-         ("differs", "Differs from VR off", differ)] + \
+         ("differs", "Differs from VR off", differ), ("look", "Look-around flags", looked)] + \
         ([("differs-game", "Differs from the game view", differ_game)] if SAME_FRAME_FLAG is not None else [])
     filter_html = "".join(
         f'<button class="filter{" on" if k == "all" else ""}" data-filter="{k}" type="button">{esc(label)} '
@@ -381,6 +451,9 @@ figcaption { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; text-
 .check { padding-left: 10px; border-left: 3px solid var(--ok); }
 .check.fail { border-left-color: var(--broken); }
 .check.info { border-left-color: var(--none); }
+.sweep { display: grid; gap: 8px; }
+.sweep h3 { font: 600 12px var(--body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.sweep .thumbs { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
 .check .stats { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .thumb figcaption { font-size: 11px; text-transform: none; letter-spacing: 0; }
@@ -421,7 +494,8 @@ figcaption { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; text-
       screens.forEach(function (s) {
         s.hidden = !(f === "all" || (f === "failed" ? s.dataset.failed === "1" :
                      f === "differs" ? s.dataset.differs === "1" :
-                     f === "differs-game" ? s.dataset.differsGame === "1" : s.dataset.status === f));
+                     f === "differs-game" ? s.dataset.differsGame === "1" :
+                     f === "look" ? s.dataset.look === "1" : s.dataset.status === f));
       });
     });
   });
