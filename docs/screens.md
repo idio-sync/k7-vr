@@ -9,16 +9,19 @@ decision) or `ok`.
 Reviewed 2026-11-17 from the simulated headset (100° vertical view, head straight ahead) against
 the same tour with VR off.
 
-## The pattern behind most of the "wrong" screens
+## Split overlays (fixed 2026-11-17)
 
-Screen-sized 2D overlays are split. Their textured parts (text, portraits, icons) go to the HUD
-panel, 1.4 m wide at 2 m: small, in the middle of the view. Their untextured parts (letterbox
-bars, dim bands, prompt boxes, flashes) stay in the eye images, where they stretch across the
-whole view and turn with the head. So subtitles float small in mid-scene without their bar, a
-title card's dim band crosses the whole view with its name tiny in the middle, and a prompt's box
-sits at the bottom of the view while its text is in the centre. The pause menu had the same
-problem until b1b70f6 moved menus whole onto the screen panel; these overlays draw too few
-untextured quads to count as menus (see kMenuQuads).
+Screen-sized 2D overlays used to be split: their textured parts (text, portraits, icons) went
+to the HUD panel, small in the middle of the view, and their untextured parts (dims, prompt
+boxes, frame lines) stayed in the eye images, stretched across the whole view. Now every
+untextured 2D quad after the 3D scene that isn't a full-screen fade goes to the HUD panel with
+the overlay's text, in the game's order (the mod reads each quad's corners from the game's
+vertex buffer to tell a fade, over 95% of the screen, from the rest). The HUD panel grew to the
+screen panel's angle (2.13 m wide at 2 m, about 56°), so overlays made for the full screen are
+1.5 times larger than before. Confirmed on the LT eye view, the quit prompt, the silhouette
+tutorial's header and the opening cutscene's subtitles. Cutscene letterbox bars aren't drawn in
+VR: they are the background colour around the cutscene's picture, not quads, so subtitles float
+over the scene without their dark red bar (readability is a headset check).
 
 ## Cutscene close-ups don't line up with the game's own view
 
@@ -61,11 +64,10 @@ breaks that pass. The tour's 2D comparison flags it (about 10% of the picture di
 Status: ok
 
 ## silhouette tutorial
-Status: wrong
+Status: ok
 
-The laser and silhouette are in 3D and fine, but the "TARGET: 00 Angel" bar is on the HUD panel,
-small in the middle of the view, while the small red square from the same corner stays at the
-eye's top right. One overlay, two places.
+The laser and silhouette are in 3D; the "TARGET: 00 Angel" bar is whole on the HUD panel with
+its red square (it was split before the overlay fix).
 
 ## moon red
 Status: ok
@@ -86,10 +88,12 @@ Status: unsure
 As above.
 
 ## opening cutscene, subtitles
-Status: wrong
+Status: unsure
 
-The subtitles and their dark red bar don't read as in the original: the text is small in the
-middle of the view (HUD panel) and the bar is drawn across the eye. See the pattern above.
+The subtitles are on the HUD panel, in its lower part, 1.5 times larger than before the overlay
+fix ("Our information tells us that there's 14 of 'em" in a targeted run). There's no dark red
+bar behind them in VR (it is the background around the cutscene's letterboxed picture), so check
+in the headset whether white text over the scene reads well enough or needs a backing.
 
 ## chapter title card
 Status: ok
@@ -104,12 +108,11 @@ Status: ok
 Garcian's first corridor in 3D. The compass/eye icon is on the HUD panel, near the middle.
 
 ## LT eye view
-Status: wrong
+Status: ok
 
-Holding LT (the left grip) dims the scene and shows Garcian's name and portrait. In VR the grey
-dim covers the upper left of the whole view, in the eyes, while the name and portrait are small
-on the HUD panel: the same split as the menus had. (It no longer switches to the flat screen:
-c9963a3.)
+Holding LT (the left grip) dims the scene and shows Garcian's name and portrait. The dim, its
+frame lines, the name and the portrait are whole on the HUD panel (the dim was in the eyes,
+across the view, before the overlay fix; same-frame difference 12.7% -> 1.5%).
 
 ## aim
 Status: unsure
@@ -135,10 +138,11 @@ Flat on the screen panel and complete, but small: the panel is 3.2 m wide at 3 m
 and the map's labels are fine print at that size. Check legibility in the headset.
 
 ## quit to title prompt
-Status: wrong
+Status: ok
 
-"Return to title screen?" and Yes/NO are small in the middle (HUD panel); the prompt's dark red
-box is a band across the bottom of the eye view, well below them.
+"Return to title screen?", Yes/NO and the prompt's dark red box are whole on the HUD panel (the
+box was a band across the bottom of the eye view before the overlay fix; same-frame difference
+10.1% -> 1.9%).
 
 ## pause menu
 Status: ok
@@ -176,14 +180,16 @@ cutscenes should be framed at all in VR).
 ## static transition
 Status: wrong
 
-The full-screen static between scenes shrinks to a rectangle in the middle of the view (it is
-drawn from the last frame's image and goes to the HUD panel), over the head-tracked scene.
+The static between scenes. When the tour catches it as a 2D frame it's on the screen panel, as
+with VR off; when caught over a 3D frame it shrinks to a rectangle in the middle of the view (a
+textured full-screen effect, so it goes to the HUD panel). Not covered by the overlay fix, which
+handles untextured quads; full-screen textured effects need the same "fade" treatment.
 
 ## subtitled cutscene
-Status: wrong
+Status: unsure
 
-"My friends are all dead" is small in the middle of the scene (HUD panel), without its bar. See
-the pattern above.
+As the opening cutscene's subtitles: text on the HUD panel, larger since the overlay fix, no bar
+behind it in VR. The tour's capture often falls between lines.
 
 ## red flower cutscene
 Status: ok
@@ -191,10 +197,11 @@ Status: ok
 The petals and the scene are 3D and fine.
 
 ## Dan Smith title card
-Status: wrong
+Status: unsure
 
-A dark band crosses the whole eye view and "Dan Smith" is small in the middle of it (HUD panel);
-the original is a letterboxed close-up with the name.
+Before the overlay fix a dark band crossed the whole eye view with "Dan Smith" small in the
+middle. The band is an untextured quad, so it should now be on the HUD panel with the name; the
+tour's capture since then fell just before the card, so it isn't confirmed.
 
 ## lobby (Dan)
 Status: ok

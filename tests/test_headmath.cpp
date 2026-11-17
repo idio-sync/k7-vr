@@ -178,7 +178,22 @@ static void test_frustum_rect_unclamped() {
     }
 }
 
+static void test_ortho_quad_cover() {
+    // The game's 2D draws: 640x480 positions, identity model-view (z -300), this projection.
+    const float mv0[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -300};
+    const float proj[16] = {0.003125f, 0, 0, -1, 0, -0.004167f, 0, 1, 0, 0, -0.001111f, -1.111f, 0, 0, 0, 1};
+    const float lt_dim[8] = {0, 0, 384, 0, 0, 239, 384, 239};  // the LT view's dim (upper left)
+    CHECK_NEAR(ortho_quad_cover(lt_dim, mv0, proj), (384.0 / 640) * (239.0 / 480), 0.005);
+    const float fade[8] = {0, 0, 640, 0, 0, 480, 640, 480};  // a full-screen fade
+    CHECK_NEAR(ortho_quad_cover(fade, mv0, proj), 1.0, 0.005);
+    const float past[8] = {-100, -100, 740, -100, -100, 580, 740, 580};  // larger than the screen
+    CHECK_NEAR(ortho_quad_cover(past, mv0, proj), 1.0, 0.005);
+    const float off[8] = {700, 0, 800, 0, 700, 100, 800, 100};  // off screen
+    CHECK_NEAR(ortho_quad_cover(off, mv0, proj), 0.0, 0.005);
+}
+
 int main() {
+    test_ortho_quad_cover();
     test_frustum_rect_unclamped();
     test_aim_angles_match_probe();
     test_world_lock_keeps_world_still();

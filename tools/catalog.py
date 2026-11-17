@@ -27,7 +27,7 @@ from imagechecks import (FLAG_CELLS, HEAD_LOCKED_FLAG, ONE_EYE_FLAG, SAME_FRAME_
 REPO = Path(__file__).resolve().parent.parent
 
 # vr.cpp: Panel{width_m, distance_m, drop_m}; pictures inside are 4:3.
-HUD_PANEL = (1.4, 2.0, 0.1)
+HUD_PANEL = (2.13, 2.0, 0.1)
 SCREEN_PANEL = (3.2, 3.0, 0.0)
 CONTENT_ASPECT = 4 / 3
 # vr.cpp fallbacks when a pair's log line has no tangents: sim_fov 100, game_xy_ratio 1.18.

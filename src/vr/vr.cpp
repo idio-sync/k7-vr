@@ -428,7 +428,9 @@ struct Panel {
     bool showing = false;  // has a picture this frame (sim too)
     bool shown = false;    // the SteamVR overlay is visible
 };
-static Panel g_hud_panel{"k7vr.hud", "Killer7 VR HUD", 1.4f, 2.0f, 0.1f, false};
+// The HUD panel spans the same angle as the screen panel (about 56 degrees): it also carries
+// whole 2D overlays (subtitles, title cards, prompts), which were made for the full screen.
+static Panel g_hud_panel{"k7vr.hud", "Killer7 VR HUD", 2.13f, 2.0f, 0.1f, false};
 static Panel g_screen_panel{"k7vr.screen", "Killer7 VR screen", 3.2f, 3.0f, 0.0f, true};
 
 static void update_panel(Panel& p, ID3D11Texture2D* src) {

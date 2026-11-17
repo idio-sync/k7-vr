@@ -161,4 +161,19 @@ void frustum_scissor(const float head[12], const float px[4], const float py[4],
     if (out[3] < out[1]) out[3] = out[1];
 }
 
+float ortho_quad_cover(const float xy[8], const float mv0[12], const float proj[16]) {
+    float lo_x = 1e9f, hi_x = -1e9f, lo_y = 1e9f, hi_y = -1e9f;
+    for (int v = 0; v < 4; ++v) {
+        const float p[4] = {xy[v * 2], xy[v * 2 + 1], 0, 1};
+        float e[4] = {0, 0, 0, 1};
+        for (int i = 0; i < 3; ++i) e[i] = mv0[i * 4] * p[0] + mv0[i * 4 + 1] * p[1] + mv0[i * 4 + 2] * p[2] + mv0[i * 4 + 3];
+        const float x = proj[0] * e[0] + proj[1] * e[1] + proj[2] * e[2] + proj[3];
+        const float y = proj[4] * e[0] + proj[5] * e[1] + proj[6] * e[2] + proj[7];
+        lo_x = fminf(lo_x, x), hi_x = fmaxf(hi_x, x), lo_y = fminf(lo_y, y), hi_y = fmaxf(hi_y, y);
+    }
+    const float w = fmaxf(0.f, fminf(hi_x, 1.f) - fmaxf(lo_x, -1.f));
+    const float h = fmaxf(0.f, fminf(hi_y, 1.f) - fmaxf(lo_y, -1.f));
+    return w * h / 4;
+}
+
 }  // namespace k7::vr

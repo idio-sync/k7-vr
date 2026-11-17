@@ -42,6 +42,10 @@ static std::unordered_map<ID3D11Resource*, std::vector<uint8_t>> g_cb;
 static float g_last_proj[16];  // the most recent perspective projMatrix the game wrote
 static std::unordered_map<ID3D11Resource*, int> g_cb_kind;  // template cbuffers: 1 perspective, 2 orthographic
 static std::unordered_map<ID3D11Resource*, void*> g_cb_mapped;
+// Where the game's dynamic vertex buffers were last mapped for writing. It appends to one large
+// buffer (WRITE_NO_OVERWRITE), so its 2D quads' vertices can be read there at draw time
+// (overlay_quad_cover) instead of being read back from the GPU.
+static std::unordered_map<ID3D11Resource*, const uint8_t*> g_vb_mapped;
 
 static UINT constant_buffer_size(ID3D11Resource* res) {
     D3D11_RESOURCE_DIMENSION dim;
@@ -233,6 +237,18 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
         describe_view(s, label, srv[i]);
         srv[i]->Release();
     }
+    {  // vertex buffer 0: how the game supplies vertices (usage 2 = dynamic, 0 = default)
+        ID3D11Buffer* vb = nullptr;
+        UINT vstride = 0, voffset = 0;
+        c->IAGetVertexBuffers(0, 1, &vb, &vstride, &voffset);
+        if (vb) {
+            D3D11_BUFFER_DESC bd;
+            vb->GetDesc(&bd);
+            appendf(s, " vb0=#%d(%u bytes, usage %d, cpu 0x%x) offset=%u first=%d", id_of(vb), bd.ByteWidth,
+                    int(bd.Usage), bd.CPUAccessFlags, voffset, first_vertex);
+            vb->Release();
+        }
+    }
     // Tiny non-indexed draws (points, lines, sprites): their vertices, as floats.
     std::vector<float> f;
     UINT stride = 0;
@@ -312,7 +328,10 @@ static bool g_frame_3d;              // a perspective draw went into the scene t
 // layering between them is lost, so such frames go to the screen panel whole, as the game view
 // draws them.
 constexpr int kMenuQuads = 24;
-static int g_menu_quads;             // untextured 2D quads drawn into the eyes after the scene this frame
+// An untextured 2D quad covering at least this share of the screen is a fade (it stays in the
+// eyes, over the whole view); smaller ones belong to an overlay (they go to the HUD panel).
+constexpr float kFadeCover = 0.95f;
+static int g_menu_quads;             // untextured 2D quads drawn after the scene this frame (eyes or HUD)
 static bool g_menu_shown;            // the last frame went to the screen panel as a menu (logs changes)
 static unsigned g_eye_targets_made;  // the game's 4:3 targets made at the eye size (hk_CreateTexture2D)
 static ID3D11Texture2D* g_scene_tex; // the scene target of this frame's last perspective draw (diagnostics)
@@ -388,6 +407,7 @@ static bool g_pointer_mode;                           // a laser-pointer screen 
 static std::vector<UINT> g_no_laser_guns = {1269};
 static UINT g_grip_mesh;                              // vertex count of this aim session's grip draw
 static UINT g_draw_count;                             // the current draw's vertex count
+static INT g_draw_first = -1;                         // and its first vertex (-1: an indexed draw)
 
 static bool gun_has_laser() {
     return std::find(g_no_laser_guns.begin(), g_no_laser_guns.end(), g_grip_mesh) == g_no_laser_guns.end();
@@ -1837,6 +1857,41 @@ static void log_hud_draw(const char* what = "hud") {
     logf("%s", s.c_str());
 }
 
+// Four vertex positions (x, y at the start of each vertex) from mapped buffer memory; false if
+// the memory can't be read (the mapping is the game's; reading it after Unmap is tolerated by
+// the drivers but not promised, hence the guard).
+static bool copy_quad_xy(const uint8_t* first, UINT stride, float xy[8]) {
+    __try {
+        for (int v = 0; v < 4; ++v) memcpy(&xy[v * 2], first + size_t(v) * stride, 8);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Share of the screen the bound 2D quad covers (a non-indexed 4-vertex draw from a mapped
+// dynamic buffer, placed by its template constants), or -1 when that can't be told.
+static float overlay_quad_cover() {
+    if (g_draw_first < 0 || g_draw_count != 4) return -1;
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return -1;
+    auto mapped = g_vb_mapped.find(vb);
+    const uint8_t* base = mapped == g_vb_mapped.end() ? nullptr : mapped->second;
+    vb->Release();
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return -1;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (!base || stride < 8 || it == g_cb.end() || it->second.size() < kTemplateCbMin) return -1;
+    float xy[8];
+    if (!copy_quad_xy(base + offset + size_t(g_draw_first) * stride, stride, xy)) return -1;
+    const float* f = reinterpret_cast<const float*>(it->second.data());
+    return vr::ortho_quad_cover(xy, f, f + kProjOffset / 4);
+}
+
 static bool points_or_lines() {
     D3D11_PRIMITIVE_TOPOLOGY t;
     g_ctx->IAGetPrimitiveTopology(&t);
@@ -1922,6 +1977,18 @@ static void draw_stereo(DrawFn draw) {
     if (scene && kind == 2 && g_frame_3d && !eye_image) {
         ++g_menu_quads;  // (kMenuQuads)
         if (g_hud_log > 0) log_hud_draw("menu quad");
+        // An untextured 2D quad that isn't a full-screen fade is part of an overlay (a dim, a
+        // prompt's box, a frame line, a subtitle bar): into the HUD with the overlay's text, in
+        // the game's order, so the overlay stays whole. Fades stay in the eyes (the whole view).
+        const float cover = overlay_quad_cover();
+        if (cover >= 0 && cover < kFadeCover && hud_target_like(rtv[0])) {
+            g_ctx->OMSetRenderTargets(1, &g_hud_rtv, nullptr);
+            draw_hud([&] { draw_hud_masked(draw); });
+            g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+            draw_game_view(draw, rtv, dsv, scale);
+            release_targets();
+            return;
+        }
     }
     // In aim mode the first run of 3D draws after the clear whose models sit near the camera is
     // the first-person arm and gun (and the character's body behind the camera, which the grip
@@ -2104,6 +2171,7 @@ static void grab_final_source() {
 
 static void before_draw(const char* kind, UINT count, UINT instances, INT first_vertex = -1) {
     g_draw_count = count;
+    g_draw_first = first_vertex;
     if (g_cap.active) capture_draw(g_ctx, kind, count, instances, first_vertex);
     if (g_want_image) grab_final_source();
     ++g_draws;
@@ -2180,6 +2248,15 @@ static HRESULT STDMETHODCALLTYPE w_Map(ID3D11DeviceContext* c, ID3D11Resource* r
                                        UINT flags, D3D11_MAPPED_SUBRESOURCE* out) {
     HRESULT hr = real_of(c)->Map(res, sub, type, flags, out);
     if (SUCCEEDED(hr) && out && type != D3D11_MAP_READ && constant_buffer_size(res)) g_cb_mapped[res] = out->pData;
+    if (SUCCEEDED(hr) && out && (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE)) {
+        D3D11_RESOURCE_DIMENSION dim;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC bd;
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
+            if (bd.BindFlags & D3D11_BIND_VERTEX_BUFFER) g_vb_mapped[res] = static_cast<const uint8_t*>(out->pData);
+        }
+    }
     if (type == D3D11_MAP_READ || type == D3D11_MAP_READ_WRITE) {  // the game reading GPU data back
         static int logged;
         if (logged++ < 40) {
