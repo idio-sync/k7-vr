@@ -321,6 +321,7 @@ static std::unordered_map<ID3D11Resource*, ID3D11Texture2D*> g_twins;  // game t
 static std::unordered_map<ID3D11View*, ID3D11View*> g_twin_views;     // game view -> same view of the twin
 
 static bool g_frame_3d;              // a perspective draw went into the scene target this frame
+static bool g_prev_frame_3d;         // ...and the frame before it
 // Menu screens over the 3D scene (the pause menu and its pages) are built from many untextured 2D
 // quads (panels, frames, the dim) among the textured artwork: 32 a frame, against 1-3 (fades,
 // letterbox bars) in gameplay and cutscenes and up to 14 with LT held (the eye icon's view).
@@ -1945,10 +1946,11 @@ static void draw_stereo(DrawFn draw) {
         g_scene_tex = texture_of(rtv[0], &sd);
     }
     const bool eye_image = scene && kind == 2 && samples_eye_image();
-    if (eye_image && !g_frame_3d) {
+    if (eye_image && !g_frame_3d && g_prev_frame_3d) {
         // A screen-fixed backdrop made from last frame's image (drawn before the 3D scene, which
         // normally covers it). With head tracking it shows wherever geometry doesn't: skip it in
-        // the eyes (the game's own view keeps it).
+        // the eyes (the game's own view keeps it). Only while 3D frames are being drawn: in 2D
+        // screens such image draws are the picture itself (the Options TV bends its text this way).
         draw_game_view(draw, rtv, dsv, scale);
         release_targets();
         return;
@@ -2926,6 +2928,7 @@ static void end_frame(IDXGISwapChain* sc) {
                 logf("sweep %03u yaw %g pitch %g: draws %u", n, g_sweep_yaw, g_sweep_pitch, g_draws_last);
             }
         }
+        g_prev_frame_3d = g_frame_3d;
         g_frame_3d = false;
         g_menu_quads = 0;
         g_final[0] = g_final[1] = nullptr;

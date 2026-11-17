@@ -53,12 +53,13 @@ Status: ok
 The cursor differs from the VR-off run (it starts wherever it was), nothing else.
 
 ## title options
-Status: broken
+Status: ok
 
-The TV's picture is empty in VR: the green options text (Reverse Controls, Rumble, More...,
-Back to Title Screen) and the ticker never appear, though the menu still works blind. Likely the
-text is drawn into an off-screen texture first, and resizing the game's targets for the eyes
-breaks that pass. The tour's 2D comparison flags it (about 10% of the picture differs).
+The TV shows its green options text, bent onto the curved screen as with VR off (fixed
+2026-11-17; 2D comparison 9.7% -> 0.0%). The game draws the text flat, copies the frame, and
+draws the copy onto the TV's curved screen mesh; the mod skipped those copy draws as "a backdrop
+made from last frame's image", a rule meant for 3D frames. It now applies only while 3D frames
+are being drawn. Note: "More..." starts the separate configuration tool.
 
 ## difficulty
 Status: ok
