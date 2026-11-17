@@ -227,6 +227,11 @@ def build(game, out):
     return entries
 
 
+def game_flagged(e):
+    """Whether a 3D screen's same-frame score flags it (never while SAME_FRAME_FLAG is None)."""
+    return SAME_FRAME_FLAG is not None and (e["same_frame"] or 0) > SAME_FRAME_FLAG
+
+
 def esc(s):
     return html.escape(s, quote=True)
 
@@ -236,7 +241,7 @@ def page(entries, have_flat, findings=()):
     unreviewed = sum(1 for e in entries if not e["status"])
     failed = sum(1 for e in entries if any(not c["pass"] for c in e["checks"]))
     differ = sum(1 for e in entries if (e["differs"] or 0) > FLAG_CELLS)
-    differ_game = sum(1 for e in entries if (e["same_frame"] or 0) > SAME_FRAME_FLAG)
+    differ_game = sum(1 for e in entries if game_flagged(e))
     kind_label = {"3D": "3D", "menu": "Menu", "2D": "2D"}
 
     cards = []
@@ -255,8 +260,12 @@ def page(entries, have_flat, findings=()):
                        f'{"Differs from" if flagged else "Matches"} the picture with VR off'
                        f'<span class="stats mono">{100 * e["differs"]:.1f}% of cells differ '
                        f'(flagged over {100 * FLAG_CELLS:.0f}%)</span></li>')
-        flagged_game = (e["same_frame"] or 0) > SAME_FRAME_FLAG
-        if e["same_frame"] is not None:
+        flagged_game = game_flagged(e)
+        if e["same_frame"] is not None and SAME_FRAME_FLAG is None:
+            checks += (f'<li class="check info">Compared with the game\'s own view of the same frame'
+                       f'<span class="stats mono">{100 * e["same_frame"]:.1f}% of cells differ '
+                       f'(information only: not yet a reliable flag)</span></li>')
+        elif e["same_frame"] is not None:
             checks += (f'<li class="check {"fail" if flagged_game else "pass"}">'
                        f'{"Differs from" if flagged_game else "Matches"} the game\'s own view of the same frame'
                        f'<span class="stats mono">{100 * e["same_frame"]:.1f}% of cells differ '
@@ -293,7 +302,8 @@ def page(entries, have_flat, findings=()):
 
     filters = [("all", "All", len(entries))] + [(k, v, counts[k]) for k, v in STATUSES.items()] + \
         [("unreviewed", "Not reviewed", unreviewed), ("failed", "Check failed", failed),
-         ("differs", "Differs from VR off", differ), ("differs-game", "Differs from the game view", differ_game)]
+         ("differs", "Differs from VR off", differ)] + \
+        ([("differs-game", "Differs from the game view", differ_game)] if SAME_FRAME_FLAG is not None else [])
     filter_html = "".join(
         f'<button class="filter{" on" if k == "all" else ""}" data-filter="{k}" type="button">{esc(label)} '
         f'<span class="count mono">{n}</span></button>' for k, label, n in filters)
@@ -370,6 +380,7 @@ figcaption { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; text-
 .checks { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
 .check { padding-left: 10px; border-left: 3px solid var(--ok); }
 .check.fail { border-left-color: var(--broken); }
+.check.info { border-left-color: var(--none); }
 .check .stats { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .thumb figcaption { font-size: 11px; text-transform: none; letter-spacing: 0; }
@@ -432,6 +443,6 @@ if __name__ == "__main__":
             mark = "DIFFERS" if e["differs"] > FLAG_CELLS else "matches"
             print(f"  {e['n']:02d} {e['name']:32s} {mark:8s} {100 * e['differs']:5.1f}% of cells differ from VR off")
         if e["same_frame"] is not None:
-            mark = "DIFFERS" if e["same_frame"] > SAME_FRAME_FLAG else "matches"
+            mark = "info" if SAME_FRAME_FLAG is None else "DIFFERS" if game_flagged(e) else "matches"
             print(f"  {e['n']:02d} {e['name']:32s} {mark:8s} {100 * e['same_frame']:5.1f}% of cells differ "
                   f"from the game's own view")

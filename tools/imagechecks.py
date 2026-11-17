@@ -14,9 +14,13 @@ FLAG_CELLS = 0.03
 # A crop that keeps less than this share of the game camera's view isn't compared.
 MIN_CROP = 0.25
 
-# 3D screens are flagged when over this share of cells differ from the game's own view of the
-# same frame. Provisional until measured on the reviewed screens.
-SAME_FRAME_FLAG = 0.10
+# 3D screens would be flagged when over this share of cells differ from the game's own view of
+# the same frame. None: not flagged, the score is shown as information only. Measured on the
+# reviewed screens (2026-11-17 tour) the ranges overlap: screens that look right scored 0.2-3.9%
+# in play but 16.6% (persona change) and 28% (red flower cutscene) in cutscenes, where the eye's
+# crop shows a wider shot than the game's view at the same zoom (unexplained); screens that look
+# wrong scored 2.7% (Dan Smith title card, dark) to 12.5% (LT eye view).
+SAME_FRAME_FLAG = None
 
 
 def compare(vr_pic, flat_pic):
