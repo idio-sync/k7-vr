@@ -1,0 +1,298 @@
+# The screen tour (tools\check.ps1): from launch through the first target's opening, every
+# screen reached gets `screen NAME` (a pair in the simulated headset, a screenshot with VR off),
+# and most get an `expect` first (checked over 1 s, before the capture). The timings are the
+# ones the run was worked out with; inserting steps that take time shifts what follows.
+# Keyboard works until the pad is used (the first `press A` after the moon); after that only
+# the pad does. Pad: A walk/accept, B turn/back, X map, BACK quit prompt, RB camera, RT aim,
+# LT eye view (with RT: scan), START pause menu. Pause menu: hold the stick towards an entry,
+# A while holding (plain presses are ignored there).
+
+# --- Boot (keyboard) ---
+wait 8000
+expect 2d 1000
+wait 1200
+screen language select
+key SPACE
+wait 3000
+screen content warning
+key SPACE
+wait 6000
+screen logos
+wait 8000
+key SPACE
+wait 2500
+expect 2d 1000
+wait 1200
+screen press start
+key SPACE
+wait 2500
+expect 2d 1000
+wait 1200
+screen title menu
+# The cursor doesn't start on NEW GAME: to the top first, then down to OPTIONS (two downs from
+# wherever it starts can land on EXIT, which quits).
+key W
+wait 300
+key W
+wait 300
+key W
+wait 300
+key W
+wait 300
+key S
+wait 500
+key S
+wait 500
+key SPACE
+wait 3000
+expect 2d 1000
+wait 1200
+screen title options
+# Out through "Back to Title Screen" (ESC does nothing here; Space on "More..." starts the
+# separate configuration tool).
+key S
+wait 800
+key S
+wait 800
+key S
+wait 800
+key SPACE
+wait 2500
+key W
+wait 300
+key W
+wait 300
+key W
+wait 300
+key W
+wait 300
+key SPACE
+wait 2500
+screen difficulty
+key SPACE
+wait 6000
+screen silhouette tutorial
+key SPACE
+wait 8000
+key SPACE
+wait 8000
+screen moon red
+key J
+wait 3000
+screen moon blue
+
+# --- Opening (pad from here) ---
+press A
+wait 18800
+expect 3d 1000
+wait 1200
+screen opening cutscene
+wait 69000
+screen opening cutscene, later
+press RIGHT
+wait 400
+press A
+wait 4600
+screen opening cutscene, subtitles
+wait 5000
+press RIGHT
+wait 400
+press A
+wait 4600
+expect 2d 1000
+wait 1200
+screen chapter title card
+wait 3800
+press RIGHT
+wait 400
+press A
+wait 9600
+press RIGHT
+wait 400
+press A
+wait 9600
+press RIGHT
+wait 400
+press A
+wait 9600
+press RIGHT
+wait 400
+press A
+wait 9600
+press RIGHT
+wait 400
+press A
+wait 9600
+press RIGHT
+wait 400
+press A
+wait 10000
+
+# --- Garcian in the corridor ---
+expect 3d 1000
+wait 1200
+screen corridor
+padhold - 0 0 1 0
+wait 1500
+expect 3d 1000
+wait 1200
+screen LT eye view
+padhold - 0 0
+wait 2000
+padhold - 0 0 0 1
+wait 2000
+expect 3d 1000
+wait 1200
+screen aim
+padhold - 0 0 1 1
+wait 1500
+screen aim with scan
+padhold - 0 0
+wait 2500
+press RB
+wait 2000
+expect 3d 1000
+wait 1200
+screen camera changed
+press X
+wait 2500
+expect 2d 1000
+wait 1200
+screen map
+press B
+wait 2500
+press BACK
+wait 2000
+screen quit to title prompt
+press B
+wait 2000
+
+# --- Pause menu (Garcian) ---
+press START
+wait 3000
+expect menu 1000
+wait 1200
+screen pause menu
+padhold - 0 1
+wait 1200
+padhold A 0 1
+wait 300
+padhold - 0 1
+wait 300
+padhold - 0 0
+wait 3000
+expect menu 1000
+wait 1200
+screen Smiths page (Garcian)
+press B
+wait 1500
+press B
+wait 1500
+press B
+wait 2500
+press START
+wait 3000
+padhold - -1 0
+wait 1200
+padhold A -1 0
+wait 300
+padhold - -1 0
+wait 300
+padhold - 0 0
+wait 3000
+expect menu 1000
+wait 1200
+screen Items page
+hold A 400
+wait 3000
+screen photo viewer
+press B
+wait 2000
+press B
+wait 2000
+press B
+wait 2500
+press START
+wait 3000
+padhold - 1 0
+wait 1200
+padhold A 1 0
+wait 300
+padhold - 1 0
+wait 300
+padhold - 0 0
+wait 3000
+expect menu 1000
+wait 1200
+screen Memos page
+hold A 400
+wait 3000
+screen pigeon memo
+press B
+wait 2000
+press B
+wait 2000
+press B
+wait 2500
+press START
+wait 3000
+padhold - 0 -1
+wait 1200
+padhold A 0 -1
+wait 300
+padhold - 0 -1
+wait 300
+padhold - 0 0
+wait 3000
+expect menu 1000
+wait 1200
+screen Blood page
+press B
+wait 1500
+press B
+wait 1500
+press B
+wait 2500
+
+# --- Down the corridor: the cutscene, and Dan Smith ---
+hold A 9000
+screen cutscene starts
+wait 8000
+screen static transition
+wait 8000
+screen subtitled cutscene
+wait 16000
+screen red flower cutscene
+wait 8000
+screen Dan Smith title card
+wait 8000
+expect 3d 1000
+wait 1200
+screen lobby (Dan)
+wait 1800
+press START
+wait 3000
+padhold - 0 1
+wait 1200
+padhold A 0 1
+wait 300
+padhold - 0 1
+wait 300
+padhold - 0 0
+wait 3000
+expect menu 1000
+wait 1200
+screen Smiths page (persona list)
+hold A 400
+wait 4000
+screen persona change effect
+# The junction choice (hold the stick up, A while holding: Kaede runs to the first junction).
+padhold - 0 1
+wait 1200
+padhold A 0 1
+wait 300
+padhold - 0 0
+# 4 s was enough with VR off; the VR run (slowed by its captures) needs longer.
+wait 7000
+screen junction choice
+mark tour done

@@ -2575,9 +2575,9 @@ static void expect_finish() {
     e.kind.clear();
 }
 
-// A picture that was never drawn into reads as all zeros; the darkest real screen seen (the
-// language select) averages 0.013.
-constexpr float kBlack = 0.003f;
+// A picture that was never drawn into reads as all zeros; the darkest real screen seen (PRESS
+// START: red text on black) averages 0.003.
+constexpr float kBlack = 0.0005f;
 
 // Halfway through: what this frame handed to the headset.
 static void expect_look(bool eyes, ID3D11Texture2D* left, ID3D11Texture2D* screen) {
@@ -2801,8 +2801,10 @@ static void end_frame(IDXGISwapChain* sc) {
                 swprintf(name, 64, L"pair_%03u_screen.png", g_pair_index);
                 save_texture(vr::submitted(2) ? vr::submitted(2) : screen, path_in(name));
             }
-            logf("pair %u written (%s frame%s)", g_pair_index++, menu ? "menu" : g_frame_3d ? "3D" : "2D",
-                 g_final[1] || !left ? "" : ", right eye had no twin");
+            // (The eye's half-angle tangents: tools\catalog.py places the panels with them.)
+            logf("pair %u written (%s frame%s; eye tangents x %.4f y %.4f)", g_pair_index++,
+                 menu ? "menu" : g_frame_3d ? "3D" : "2D", g_final[1] || !left ? "" : ", right eye had no twin",
+                 g_eyes[0].px[0] ? 1 / g_eyes[0].px[0] : 0.f, g_eyes[0].py[1] ? 1 / g_eyes[0].py[1] : 0.f);
         }
         expect_frame(menu ? 1 : left ? 0 : 2, left, screen);
         g_frame_3d = false;

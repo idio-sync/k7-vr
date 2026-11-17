@@ -14,6 +14,8 @@
 //   expect 3d|menu|2d|any [ms]  check the next ms (default 1000) of frames as the headset gets them,
 //                           while the following steps run; logs "expect ...: pass" or "FAIL ..."
 //   mark text               log line when the step's turn comes (tools\check.ps1 waits on these)
+//   screen name             "screen: name" in the log and a pair (stereo) or screenshot (flat), for
+//                           the screen catalogue (tools\check.ps1, tools\catalog.py)
 //   key NAME [ms]           tap a keyboard key through raw input (default 120 ms), then 120 ms gap
 //   keydown NAME / keyup NAME   press or release a key and move on (hold across other steps)
 //   dumpf ADDR N [TAG] / dumpptr PTR OFF N TAG   log N floats (memscan.cpp)
@@ -24,7 +26,8 @@
 //   hold A[+B...] ms        hold pad buttons
 //   stick lx ly ms          left stick, -1..1
 //   pad A[+B..]|- lx ly [rt] ms   pad buttons, left stick (and right trigger 0..1) together
-//   padhold A[+B..]|- lx ly  pad buttons and left stick held across steps (padhold - 0 0 releases)
+//   padhold A[+B..]|- lx ly [lt rt]  pad buttons, left stick and triggers (0..1) held across steps
+//                           (padhold - 0 0 releases)
 //   rstick rx ry ms         right stick, -1..1
 //   trig l r ms             triggers, 0..1
 //   wait ms                 idle
@@ -40,6 +43,7 @@
 
 #include <xinput.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -215,13 +219,14 @@ static void run_line(const std::string& line) {
         s.ms = ms;
         g_steps.push_back(s);
         if (cmd == "press") g_steps.push_back(Step{.ms = 120});
-    } else if (cmd == "padhold") {  // padhold BUTTONS|- LX LY: until the next padhold (padhold - 0 0 releases)
+    } else if (cmd == "padhold") {  // padhold BUTTONS|- LX LY [LT RT]: until the next padhold (padhold - 0 0 releases)
         std::string buttons;
-        double x = 0, y = 0;
-        ss >> buttons >> x >> y;
+        double x = 0, y = 0, lt = 0, rt = 0;
+        ss >> buttons >> x >> y >> lt >> rt;
         Step h;
         if (buttons != "-") h.buttons = parse_buttons(buttons);
         h.lx = axis(x), h.ly = axis(y);
+        h.lt = BYTE(std::clamp(lt, 0.0, 1.0) * 255), h.rt = BYTE(std::clamp(rt, 0.0, 1.0) * 255);
         g_steps.push_back(Step{.action = [h] { g_hold = h; }});  // (actions run with g_mx held)
     } else if (cmd == "pad") {  // pad BUTTONS|- LX LY [RT] ms: buttons, left stick (and right trigger) together
         std::string buttons;
@@ -333,6 +338,13 @@ static void run_line(const std::string& line) {
         std::string rest;
         std::getline(ss, rest);
         g_steps.push_back(Step{.action = [=] { logf("mark:%s", rest.c_str()); }});
+    } else if (cmd == "screen") {  // a named screen for the catalogue: a pair in stereo, else a screenshot
+        std::string rest;
+        std::getline(ss, rest);
+        g_steps.push_back(Step{.action = [=] {
+            logf("screen:%s", rest.c_str());
+            (vr::stereo() ? g_cur.pair : g_cur.shot) = true;  // (g_cur is this step; its requests go out next)
+        }});
     } else if (cmd == "aimtrace") {
         int frames = 30;
         ss >> frames;
@@ -454,6 +466,8 @@ void pad_apply(XINPUT_STATE* state) {
     // `padhold`: a pad state that stays on across steps (e.g. a stick held while a pair is taken).
     pad.wButtons |= g_hold.buttons;
     if (g_hold.lx || g_hold.ly) pad.sThumbLX = g_hold.lx, pad.sThumbLY = g_hold.ly;
+    if (g_hold.lt) pad.bLeftTrigger = g_hold.lt;
+    if (g_hold.rt) pad.bRightTrigger = g_hold.rt;
     pad.wButtons |= g_cur.buttons;
     if (g_cur.lx || g_cur.ly) {
         pad.sThumbLX = g_cur.lx;

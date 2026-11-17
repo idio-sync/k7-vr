@@ -120,12 +120,19 @@ when that folder exists).
 - `tools\profile.ps1 test|playtest|sim` switches the copy's `k7vr.ini`: unattended (minimized,
   muted, scripted input, VR off), headset playtest, or the simulated headset (its eye targets
   resized like a headset's, 2048x2048, so the copies to the eyes and panels run as in a headset).
-- `tools\check.ps1` checks what a headset would be handed, in the simulated headset (about 5
-  minutes, exit code 1 on a failure): boot, a cutscene, play, LT held, the pause menu and its
-  Smiths page, back in play. Each step of `tools\scripts\check_vr.txt` that says `expect 3d|menu|2d`
-  checks which way the frames went, that the hand-off didn't keep making textures, and that what
-  the eyes or the screen panel got isn't black and matches its source. Run it before a headset
+- `tools\check.ps1` tours the game's screens in the simulated headset (about 10 minutes, exit
+  code 1 on a failure), following `tools\scripts\tour.txt`: boot and title screens, the opening,
+  Garcian's corridor (LT view, aim, scan, camera, map, quit prompt), the pause menu and its
+  pages, the cutscene into Dan Smith's lobby, the persona list, a persona change and a junction
+  choice. Each `expect 3d|menu|2d` in it checks which way the frames went, that the hand-off
+  didn't keep making textures, and that what the eyes or the screen panel got isn't black and
+  matches its source; each `screen NAME` saves what the headset is handed. `-Flat` runs the
+  same tour with VR off, for the reference picture of each screen. Run it before a headset
   session; it can't judge comfort, scale, aim feel or the real controllers' bindings.
+- `python tools\catalog.py` builds the screen catalogue (`<game>\k7vr\tour\catalog\index.html`)
+  from the last two tours: per screen, an approximate headset view (the left eye with the HUD
+  and screen panels drawn where they float), the VR-off reference, the raw images, the checks,
+  and the status and notes in `docs\screens.md`.
 - `tools\run.ps1` / `-Stop` / `-Normal` start and stop the copy.
 - `tools\cmd.ps1 'key SPACE' 'wait 2000' 'shot'` or `tools\cmd.ps1 -File tools\scripts\new_game.txt`
   sends commands; the list is at the top of `src\proxy\control.cpp` (input, screenshots, stereo
@@ -137,4 +144,5 @@ when that folder exists).
 
 Output lands in `<game>\k7vr\`: `k7vr.log`, `status.txt`, `shot_*.png`, `capture_*` (per-draw
 lists and snapshots), `pair_*` (both eyes as sent to the headset, the raw scene, HUD, screen,
-the panels' own copies, the game's own view), `check.log` (the last `tools\check.ps1` run).
+the panels' own copies, the game's own view), `tour\vr\` and `tour\flat\` (the last
+`tools\check.ps1` runs: log and captures), `tour\catalog\` (the screen catalogue).
