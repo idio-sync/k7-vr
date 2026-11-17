@@ -222,9 +222,12 @@ blends to a smooth grey in the eyes. The same-frame check flags it for that (16.
 headset whether the softened look is fine or the stripes should be kept here.
 
 ## junction choice
-Status: unsure
+Status: wrong
 
-Reached with VR off (Kaede at the first junction: "Hallway" and "Iwazaru" labels, arrows, a
-picture-in-picture view); the VR run, slowed by its captures, was still a moment earlier, with
-Kaede in the lobby. The tour now waits longer before this capture. This screen is where
-traversal looked wrong in the first headset session, so it's the next one to look at.
+Kaede at the first junction: "Hallway" and "Iwazaru" labels, white outlines, a red striped
+mask with window cut-outs, a picture-in-picture preview. The tour's capture still lands a
+moment early (Kaede in the lobby; holding A for 4 s more reaches the junction). Seen on
+2026-11-17 (`docs\status.md`, "Past the first junction"): the mask and the preview stay in the
+eyes stretched over the whole view, while the outlines and labels are on the HUD panel at about
+half that size, so the outlines frame nothing. Same-frame check 23%. Every junction does this;
+it is probably what looked wrong in the first headset session.

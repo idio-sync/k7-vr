@@ -56,17 +56,68 @@ screen panel (`kMenuQuads`). Frames with no perspective draw are 2D: screen pane
 - **Dan Smith title card**: should be whole on the HUD panel since c520a25; the tour's capture
   keeps landing just before the card.
 
+## Past the first junction (explored 2026-11-17, simulated headset and VR off)
+
+There was no earlier save (slot B was an empty folder). A new one was made in Harman's Room:
+Slot A, file 1 ("[Angel] 11/17", `<test copy>\k7vr\SavedGames\killer7\Killer7eu_0`, copy in
+`<test copy>\k7vr\save_backups\harman_room_2026-11-17`). Route from Kaede in the lobby: hold A
+to the junction, "Iwazaru" (stick right + A) is a hint dialog, then "Harman's Room" (right).
+Inside: "TV" (up-left), "Samantha" (up-right: save), "Room" (right: the back half, Iwazaru).
+Out through "Hallway" (left), then "Elevator Hall" (up-left) at the lobby junction; Iwazaru
+there first, then a Heaven Smile at the elevator door.
+
+Loading it (VR off; keyboard): boot as the tour does, Space at PRESS START, W x4 then S
+(CONTINUE), Space (Slot A), Space (file 1), "Load this file?" starts on NO: A then Space. It
+opens on the silhouette aiming check (J fires), then the moon (pad A), then Kaede at Harman's
+Room's junction. Junctions: hold the stick towards a label, A while holding (`padhold - X Y`,
+`padhold A X Y`, release); a plain stick-up didn't take "Hallway" in the Elevator Hall before
+Iwazaru had been talked to.
+
+VR-only problems found (pictures from that run are not kept in the repo):
+
+- **Harman's TV, persona channels: broken.** VR off shows the persona's face close up across
+  the TV, "Serum", "Vitality", the name, a scrolling help line, a "SELECT" box and a
+  "<name> Change? Yes / No" dialog. In VR the face is small and seen from further off, and all
+  the text is gone (empty green and yellow boxes; the frames count as menus, so the screen panel
+  shows the game view without it). Likely cause, unconfirmed: the TV's picture is drawn into a
+  4:3 frame-sized target that is then mapped onto the TV mesh; `hk_CreateTexture2D` makes such
+  targets at eye size, so the portrait is drawn with the eyes' frustum and the text is taken to
+  the HUD panel instead of into the TV picture. A `capture` on the TV would settle it.
+- **Harman's TV, Blood Room channel (B):** counted as a 3D frame, so it is split: TV set, dial
+  and text on the HUD panel, the 3D room inside the TV loose in the eyes (unframed, at the game
+  view's size), the glass's scan curve stretched across the eye. Turning the dial flips between
+  this split, the HUD panel (the static) and the screen panel (channel 2 counts as a menu). The
+  eye tangent changes while on the TV (x 1.41 -> 1.59) along with the game's projection.
+- **Junctions (every one): wrong.** The red striped mask with its window cut-outs and the
+  grey picture-in-picture preview are full-screen 2D draws of the eye's picture, so they stay in
+  the eyes stretched over the whole 100° view; the white outlines and labels go to the HUD
+  panel (56°). In the headset the outlines frame nothing (about half the windows' size) and the
+  preview's outline is far from the preview. Same-frame check: 12-23% (flagged).
+- **HUD panel against the game's FOV.** The HUD panel is a fixed 56°; the game view is 60° in
+  the lobby and 42° in Harman's Room. Overlays that point into the scene (junction lines meeting
+  at the persona) line up only when the two angles match. Drawing such overlays at the game
+  view's size, or sizing the HUD panel to it each frame, would fix both this and the junctions.
+- **Letterboxed scenes: a 1-pixel line** in the letterbox colour (45,10,10) across the eye at
+  row 136 of 2048, in every letterboxed cutscene and dialog of the run (pairs 28, 30-32, 39).
+- **Iwazaru's first dialog**: the flat picture was tinted teal, the eye wasn't (the same-frame
+  check compares grey levels, so it scored 0.6%). The second dialog matched; possibly a tint
+  caught mid-transition. Unconfirmed.
+- **Harman's Room**: the camera looks down from high up at 42°, so in VR the room is a small lit
+  spot in the middle third of the view; the spotlight cones end at a hard edge just above the
+  original framing (as the pigeon memo's set does). Headset look.
+- Fine in VR: the save and load screens (2D, whole on the screen panel, text present), the
+  corridors, the ceiling-light glows, the blood splash when a Heaven Smile reaches the persona
+  (full screen in the eyes). The fight itself wasn't captured: the Smile reached Kaede during
+  aiming; Kaede then has to be swapped on the TV.
+
 ## Next steps
 
-1. **Extend the tour past the first junction using the saved game.** The user approved loading
-   the test copy's save (slot B, written 2026-10-22, in `<test copy>\k7vr\SavedGames\killer7`)
-   on 2026-11-17. How CONTINUE and slot selection work hasn't been explored: boot to the title
-   menu (as the tour does: W x4 puts the cursor on NEW GAME, CONTINUE is one below), take
-   screenshots at each step. Targets: Harman's room and saving, the Iwazaru hint dialogs,
-   combat with Heaven Smiles, game over, FMV cutscenes. Add `screen`/`expect`/`sweep` steps
-   for each; keep a separate script (e.g. `tools\scripts\tour_save.txt`) if it starts from
-   CONTINUE.
-2. **After a headset session**, fold the user's findings into `docs\screens.md` and fix what's
+1. **Fix the Harman TV** (capture it first: which targets are resized, where the text goes),
+   then the junctions and the HUD panel's size against the game view (see above).
+2. **A save tour** (`tools\scripts\tour_save.txt`): from CONTINUE as above through Harman's
+   Room, the TV channels, a junction and the Elevator Hall; `expect` and `screen` steps as in
+   the tour. Then the fight (aim and scan before the Smile reaches you), game over, FMVs.
+3. **After a headset session**, fold the user's findings into `docs\screens.md` and fix what's
    wrong; add checks so fixes stay fixed.
 
 ## Working on it
@@ -108,3 +159,6 @@ screen panel (`kMenuQuads`). Frames with no perspective draw are 2D: screen pane
   profile sets 2048x2048); hand-off bugs that need the real resolution or OpenVR overlays still
   need a headset (see 2026-10-26: the menu copy rebuilt every frame).
 - Other Claude sessions use the same test copy; check for a running Killer7Win before launching.
+- With a save present, VR-off boots reach PRESS START later than VR runs; take a `shot` at the
+  title menu before choosing (a fixed script once started NEW GAME instead of CONTINUE).
+- The same-frame check compares grey levels: a lost colour tint scores near 0.
