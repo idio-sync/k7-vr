@@ -62,6 +62,8 @@ struct Requests {
     float stereo = -1;       // >= 0: new eye separation in GX eye-space units (0 = off)
     bool view = false;       // new free-look angles from the game camera
     float yaw = 0, pitch = 0;
+    bool sweep = false;      // `sweep`: capture the next frame for this head direction
+    float sweep_yaw = 0, sweep_pitch = 0;
 };
 // Our own shaders (entry point "main"), through the real compiler; null on failure (logged).
 ID3DBlob* compile_hlsl(const char* src, const char* target, const char* name);
