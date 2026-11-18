@@ -254,8 +254,8 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
     std::vector<float> f;
     UINT stride = 0;
     // (Indexed 6-index quads: their four vertices from the base vertex.)
-    const UINT shown = first_vertex >= 0 ? count : 4;
-    if (count <= 10 && (first_vertex >= 0 || (count == 6 && g_draw_base >= 0)) &&
+    const UINT shown = first_vertex >= 0 ? count : count / 6 * 4;
+    if (count <= 12 && (first_vertex >= 0 || (count % 6 == 0 && g_draw_base >= 0)) &&
         read_vertices(c, UINT(first_vertex >= 0 ? first_vertex : g_draw_base), shown, f, &stride)) {
         appendf(s, " verts(stride %u)=", stride);
         for (UINT v = 0; v < shown; ++v) {
@@ -2111,6 +2111,43 @@ static bool extend_window(const float in[8], float out[8]) {
     return true;
 }
 
+// The junction's letterbox: an untextured indexed draw of quads that each span the screen's width
+// along its top or bottom edge (two bars, 64 of 480 lines each). Meant for the flat screen; in the
+// eyes it would be a black strip across the middle of the view, so it is left out there.
+static bool is_letterbox_bars() {
+    if (g_draw_first >= 0 || g_draw_base < 0 || g_draw_count == 0 || g_draw_count % 6 || g_draw_count > 24) return false;
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return false;
+    auto mapped = g_vb_mapped.find(vb);
+    const uint8_t* base = mapped == g_vb_mapped.end() ? nullptr : mapped->second;
+    vb->Release();
+    const UINT n = g_draw_count / 6 * 4;
+    uint8_t raw[16 * 64];
+    if (!base || stride < 12 || stride > 64 || n > 16 ||
+        !copy_vertex_bytes(base + offset + size_t(g_draw_base) * stride, size_t(stride) * n, raw))
+        return false;
+    float xy[16 * 2];
+    for (UINT i = 0; i < n; ++i) memcpy(&xy[i * 2], raw + size_t(i) * stride, 8);
+    float z;
+    memcpy(&z, raw + 8, sizeof(z));
+    float m[4], c[2];
+    if (!ortho_map(z, m, c)) return false;
+    for (UINT q = 0; q < n / 4; ++q) {
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (UINT i = q * 4; i < q * 4 + 4; ++i) {
+            const float nx = m[0] * xy[i * 2] + m[1] * xy[i * 2 + 1] + c[0];
+            const float ny = m[2] * xy[i * 2] + m[3] * xy[i * 2 + 1] + c[1];
+            x0 = std::min(x0, nx), x1 = std::max(x1, nx), y0 = std::min(y0, ny), y1 = std::max(y1, ny);
+        }
+        const bool wide = x0 <= -0.99f && x1 >= 0.99f;
+        const bool at_edge = y0 <= -0.99f || y1 >= 0.99f;
+        if (!wide || !at_edge || y1 - y0 > 0.5f) return false;
+    }
+    return true;
+}
+
 // A junction window (`outline` false: a 6-index quad sampling the frame copy) or its outline
 // (an 8-vertex strip that follows the last window's corners), drawn extended into both eyes.
 // False when it isn't one (then draw_junction draws it as it is).
@@ -2499,9 +2536,12 @@ static void draw_stereo(DrawFn draw) {
             const bool full_vp =
                 scale.nvp && scale.vp[0].Width >= 0.95f * g_orig_w && scale.vp[0].Height >= 0.95f * g_orig_h;
             if (!(full_vp && quad_cover() >= kFadeCover)) {  // (full-screen filters: below; the inset fills its own viewport)
-                // Windows and their outlines reach the edge of the view (draw_junction_extended).
+                // Windows and their outlines reach the edge of the view (draw_junction_extended);
+                // the letterbox bars stay out of the eyes.
                 bool done = false;
-                if (full_vp && g_draw_first < 0 && g_draw_count == 6 && eye_image)
+                if (full_vp && !pixel_shader_textured() && is_letterbox_bars())
+                    done = true;
+                else if (full_vp && g_draw_first < 0 && g_draw_count == 6 && eye_image)
                     done = draw_junction_extended(false, scale, rtv, dsv);
                 else if (full_vp && g_draw_first >= 0 && g_draw_count == 8 && !pixel_shader_textured())
                     done = draw_junction_extended(true, scale, rtv, dsv);

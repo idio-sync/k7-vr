@@ -136,14 +136,15 @@ drawn again with the game's own shaders from copies of their vertices (`g_junc_v
 corners pushed out along the side edges (`kJuncReach`), placed so the game's transform puts
 them where draw_junction would but with the viewport over the whole eye; a window's texture
 coordinates become the eye's own pixel in the full eye copy. The preview inset and the labels
-stay at the rectangle.
+stay at the rectangle. The junction's letterbox (an untextured draw of two full-width bars, the
+top and bottom 64 of 480 lines, `is_letterbox_bars`) is left out of the eyes.
 
 ## The save tour
 
 `tools\check.ps1 -Script tour_save` (about 3 minutes) loads the save from CONTINUE and visits
 Harman's Room, the TV's channels (`expect 2d` on the Blood Room, the persona and the change
 prompt), the room's junction and back half, the lobby and its junction, the Elevator Hall; runs
-are kept in `k7vr	our	our_saver` (or `flat`). 13/13 on 2026-11-17. `capture` now also prints
+are kept in `k7vr\tour\tour_save\vr` (or `flat`). 13/13 on 2026-11-17. `capture` now also prints
 the four corners of 6-index quads.
 
 ## Next steps

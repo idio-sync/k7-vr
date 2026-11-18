@@ -1,50 +1,50 @@
 # killer7-vr
 
-A VR mod for the Killer7 PC port (2018/2024 Steam release), through SteamVR: the game in stereo
-with head tracking, a HUD panel, the controllers as the gamepad, and first-person aiming where
-your right hand holds the character's own gun.
+A VR mod for the PC version of Killer7 (Steam), through SteamVR. In the headset the 3D world is
+drawn in stereo and follows your head, the character's own gun follows your right controller
+when you aim, menus and other 2D screens appear on a large virtual screen, and the HUD floats on
+a panel in front of you. The controllers act as the game's gamepad.
 
-Status: works in a simulated headset; the first real-headset session (2026-10-23) came before
-controller aiming and the sharpness fix. v1 targets the first sections of Target 00 (Angel).
+This is an early, experimental mod. It has been tested mostly with a simulated headset and in a
+few short sessions on a real one, and only through the opening of Target 00 (Angel). Expect
+rough edges (see [Known issues](#known-issues)).
 
 ## Screenshots
 
-Left-eye images as sent to the headset (simulated headset, 100° view; the HUD is on a separate
-panel and not shown).
+![A junction in the headset: the paths' windows and labels drawn over the 3D room, left and right eye side by side](media/junction.png)
 
-**The shot that starts a target.** Point the controller at the silhouette: the laser comes out of
-the controller and the game's red dot goes where it points. Pull the trigger to fire.
+![Walking through the hotel lobby in 3D, one eye](media/lobby.png)
 
-![The silhouette screen: a laser from the controller puts the red dot on the silhouette](media/silhouette.png)
-
-**Garcian, aiming.** Hold the right grip and point. Garcian's hand, sleeve and pistol are where
-your hand is, pointing where you point; the world stays put and the game's aim follows the laser.
-Three hand directions, same spot:
+![Harman's TV on the virtual screen: the persona select screen](media/harman-tv.png)
 
 ![Garcian's arm and pistol following the controller in three different directions](media/garcian-aim.png)
 
-**Dan, aiming in the lobby.** The same with Dan's revolver (no laser for Dan):
+![The silhouette screen that starts a target: a laser from the controller puts the red dot on the silhouette](media/silhouette.png)
 
-![Dan's arm and revolver following the controller in three different directions](media/dan-aim.png)
+## Requirements
 
-## Install into your game
+- Killer7 for PC (Steam) on Windows; SteamVR, a headset and two motion controllers.
+- No prebuilt releases yet: build from source with the Visual Studio Build Tools (x86 C++),
+  CMake and Ninja ([docs/development.md](docs/development.md#building)).
 
-1. `build.cmd` (VS 18 Build Tools x86, `C:\ninja.exe`) builds `out\XINPUT1_3.dll`.
-2. Close the game, then
-   `powershell -File tools\install_game.ps1 -Game "<your killer7 folder>"`.
-   It adds `XINPUT1_3.dll`, `openvr_api.dll` and a `k7vr\` folder (settings in `k7vr\k7vr.ini`,
-   log in `k7vr\k7vr.log`). It changes nothing else: not your saves, not your `killer7.ini`, not
-   the game's shader cache.
+## Install
+
+1. Build `out\XINPUT1_3.dll` with `build.cmd`.
+2. Close the game, then from the repo run
+   `powershell -File tools\install_game.ps1 -Game "<your Killer7 folder>"` (the folder with
+   `Killer7Win.exe`). It adds `XINPUT1_3.dll`, `openvr_api.dll` (any different copies already
+   there are kept as `*.k7vr-backup`) and a `k7vr\` folder with the settings, `k7vr.ini`, and
+   the log, `k7vr.log`. Your saves, your `killer7.ini` and the game's shader cache are untouched.
 3. Start SteamVR, then the game as usual. Sit facing forward; hold both stick clicks for a second
    to recentre.
 
-- **Play flat:** hold Shift while the game starts (safe mode), or set `mode=off` in `k7vr\k7vr.ini`.
-  If SteamVR can't start, the game also runs flat.
-- **Key bindings in VR:** the controllers press keyboard keys, so in VR the game reads its
-  settings from `k7vr\killer7.ini`, a copy of your `killer7.ini` (refreshed whenever yours
-  changes) with the keyboard bindings the controllers need. Your own file is only read.
-- **Uninstall:** `powershell -File tools\install_game.ps1 -Game "<folder>" -Uninstall` (`-Purge`
-  also deletes `k7vr\`).
+- **Play flat:** hold Shift while the game starts, or set `mode=off` in `k7vr\k7vr.ini`. If
+  SteamVR can't start, the game also runs flat.
+- **Key bindings:** in VR the game reads its settings from `k7vr\killer7.ini`, a copy of your
+  `killer7.ini` (refreshed whenever yours changes) with the bindings the mod needs. Your own
+  file is only read.
+- **Uninstall:** `powershell -File tools\install_game.ps1 -Game "<folder>" -Uninstall` puts any
+  backed-up DLLs back; add `-Purge` to also delete `k7vr\`.
 
 ## Controls
 
@@ -60,96 +60,41 @@ The controllers act as the game's own gamepad (its [Pad] bindings, GameCube layo
 | stick click | reload | game menu / skip (pad Start) |
 
 Both stick clicks held for a second recentre the view. On the silhouette screen that starts a
-target, just point the right controller at it.
+target, point the right controller at the silhouette and pull the trigger.
 
 ## Settings
 
-Under `[vr]` in `k7vr\k7vr.ini` (all are listed at the top of `src\vr\vr.h`):
+Under `[vr]` in `k7vr\k7vr.ini`. The ones most worth changing:
 
 | key | default | what |
 |---|---|---|
-| `mode` | openvr | `off` plays flat |
+| `mode` | openvr (as installed) | `off` plays flat |
+| `eye_scale` | 1.0 | eye image size as a multiple of SteamVR's recommended size (try 0.8 if it stutters) |
 | `unit_m` | 0.25 | metres per game unit (world size) |
-| `eye_res` / `eye_scale` | auto / 1.0 | eye image size: SteamVR's recommended size times `eye_scale` (try 0.8 if it stutters) |
-| `destripe` | 1 | blend the game's alternating 1-pixel columns (fine vertical lines in the headset otherwise) |
+| `destripe` | 1 | blend the game's alternating 1-pixel columns (0 shows fine vertical lines) |
 | `hand_pitch` | 0 | degrees the aim is tilted up from the controller's pointing axis |
 | `hand_offset` | 0,0,0 | grip point in the controller's frame (x right, y up, z back), metres |
 | `gun_scale` | 0.6 | gun and hand size |
-| `gun_clip` | 2 | how much forearm and sleeve shows behind the hand (game units) |
-| `gun_pivot` | auto | the gun's grip in the game's aim view; found per character when aiming starts |
-| `gun_align` | 1 | turn the gun straight in the hand, so its barrel points where the shot goes (the game angles each gun in towards its screen centre: Dan's ~10°); 0 = held as the game holds it, the shot still following the barrel |
-| `aim_laser` | 0 | a laser from the gun in aim mode (the game has none) |
-| `no_laser_guns` | 1269 | with `aim_laser=1`: gun meshes (vertex counts, logged when aiming starts) that get no laser |
-| `aim_depth` | 1 | aim where the controller's ray meets the scene, so shots land where you point at any range (0 = at `aim_converge_m`) |
-| `aim_ignore_m` | 1.2 | surfaces nearer your eye than this don't count as the ray's hit (your gun and hand) |
-| `aim_converge_m` | 10 | distance along the ray aimed at when the hit isn't known (ray out of view, `aim_depth=0`) |
-| `laser_m` | 30 | laser length (the silhouette screen's pointer; aim mode with `aim_laser=1`) |
-| `aim_hud_mask` | 0.6 | width of the HUD's centre band hidden in aim mode (the game's crosshair) |
-| `aim_pitch_limit` | 80 | the game's aim pitch limit, degrees (the game allows 36) |
-| `texgen_ref` | 1 | in aim mode, the game's screen-space colour gradients stay as they were when aiming began instead of shifting as the hand turns the game camera (0 = the game's own) |
+| `aim_laser` | 0 | 1 draws a laser from the gun in aim mode (the game has none) |
 
-## Playtest checklist (next headset session)
+The full list is in [docs/development.md](docs/development.md#settings).
 
-Setup with the test copy: SteamVR on, `tools\profile.ps1 playtest`, `tools\run.ps1 -Normal`, sit
-facing forward. Afterwards `tools\profile.ps1 test` and keep `k7vr\k7vr.log` (it records the
-controller types, button codes, the headset's projection and any OpenVR errors).
+## Known issues
 
-- [ ] Silhouette screen: does the dot sit where the laser points, and does a shot on the
-      silhouette start the target (a miss does nothing, as in the game)?
-- [ ] Sharpness: fine vertical lines gone? Sharp enough? (`destripe=0` to compare)
-- [ ] Aim mode (first corridor, lobby; aim at walls, doors, lights): does the laser point the way
-      you hold the controller? If too high or low, roughly how many degrees (`hand_pitch`)?
-- [ ] Is the gun in your hand: position (`hand_offset`), size (`gun_scale`), sleeve length
-      (`gun_clip`)? Check both Garcian and Dan.
-- [ ] Turning the controller far left/right/up/down: the world must not swing.
-- [ ] Fire at something: do hits land on the laser? Does the game's recoil animation feel right
-      in the hand?
-- [ ] Anything missing from the HUD in aim mode (`aim_hud_mask`)?
-- [ ] Menus and title on the big screen; cutscene captions and junction icons on the HUD panel,
-      not glued to your face; head turning keeps the scene still (black beyond ~75° off the game
-      camera is expected); comfort at camera cuts.
+- Only the opening of Target 00 is checked (up to Harman's Room and the Elevator Hall).
+- Killer7's sets are built for fixed cameras. Looking far from where the game's camera points
+  (beyond about 75°) shows black, and some sets end just outside the original framing: the top
+  of the pigeon memo scene is black, and Harman's Room's spotlights end at a hard edge.
+- Subtitles float over the scene without the dark bar behind them.
+- Nothing marks where a shot will land while aiming, unless you set `aim_laser=1`.
+- At a junction the red tint fills the whole view and the paths' windows and labels sit at
+  infinite distance; how that feels in a headset is still unknown.
+- HUD parts that point into the scene (the compass, prompts) don't always line up with it, and
+  the map's labels are small on the virtual screen.
+- Letterboxed cutscenes show a thin line across the view.
 
-## Development (the test copy)
+## Development
 
-All automated runs use a **copy** of the game (`C:\Users\Virtual\killer7-vr-game`), never the
-Steam install. The copy has `k7vr\SavedGames\` (its own saves and `killer7.ini`; the mod redirects
-Saved Games there whenever that folder exists) and `k7vr\shaders\` (shader dumps, written only
-when that folder exists).
-
-- `tools\install.ps1` installs into the copy (refuses Steam folders) and seeds its private profile.
-- `tools\profile.ps1 test|playtest|sim` switches the copy's `k7vr.ini`: unattended (minimized,
-  muted, scripted input, VR off), headset playtest, or the simulated headset (its eye targets
-  resized like a headset's, 2048x2048, so the copies to the eyes and panels run as in a headset).
-- `tools\check.ps1` tours the game's screens in the simulated headset (about 10 minutes, exit
-  code 1 on a failure), following `tools\scripts\tour.txt`: boot and title screens, the opening,
-  Garcian's corridor (LT view, aim, scan, camera, map, quit prompt), the pause menu and its
-  pages, the cutscene into Dan Smith's lobby, the persona list, a persona change and a junction
-  choice. Each `expect 3d|menu|2d` in it checks which way the frames went, that the hand-off
-  didn't keep making textures, and that what the eyes or the screen panel got isn't black and
-  matches its source; each `screen NAME` saves what the headset is handed, and each `sweep`
-  after a 3D screen looks around it (8 head directions: the views the original never shows).
-  `-Flat` runs the same tour with VR off, for the reference picture of each screen. Run it
-  before a headset session; it can't judge comfort, scale, aim feel or the real controllers'
-  bindings.
-- `python tools\catalog.py` builds the screen catalogue (`<game>\k7vr\tour\catalog\index.html`)
-  from the last two tours: per screen, an approximate headset view (the left eye with the HUD
-  and screen panels drawn where they float), the VR-off reference, the raw images, the checks,
-  the look-around strip, and the status and notes in `docs\screens.md`. It flags 2D and menu
-  screens that differ from VR off, and 3D screens whose look-around shows parts fixed to the
-  view, something in one eye only, or scenery dropped when turning (where a set simply ends
-  isn't detected: that's for people to spot in the strip). 3D screens
-  are also compared with the game's own view of the same frame (cutscenes within their letterbox
-  band) and flagged over 8%. Checks: `python -m unittest discover -s tests`.
-- `tools\run.ps1` / `-Stop` / `-Normal` start and stop the copy.
-- `tools\cmd.ps1 'key SPACE' 'wait 2000' 'shot'` or `tools\cmd.ps1 -File tools\scripts\new_game.txt`
-  sends commands; the list is at the top of `src\proxy\control.cpp` (input, screenshots, stereo
-  pairs, per-draw captures with `capture N...`, the simulated hand, live aim tuning, memory probes).
-- `tools\sheet.ps1 -Out sheet.png -Last 4` tiles the newest screenshots.
-- Unit tests: `ctest --test-dir out` (head/aim math, the VR profile's ini rewrite).
-- The game addresses the mod relies on are documented where they're used (`aim.cpp`,
-  `fov_inflate.cpp`, `hooks_d3d.cpp`, `vr_profile.cpp`).
-
-Output lands in `<game>\k7vr\`: `k7vr.log`, `status.txt`, `shot_*.png`, `capture_*` (per-draw
-lists and snapshots), `pair_*` (both eyes as sent to the headset, the raw scene, HUD, screen,
-the panels' own copies, the game's own view), `tour\vr\` and `tour\flat\` (the last
-`tools\check.ps1` runs: log and captures), `tour\catalog\` (the screen catalogue).
+Building, the test harness, the full settings list and the playtest checklist are in
+[docs/development.md](docs/development.md). [docs/status.md](docs/status.md) is where the work
+stands and what's next.

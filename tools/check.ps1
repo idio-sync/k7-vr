@@ -7,7 +7,7 @@
 #   tools\check.ps1 -Flat        the same tour with VR off: the reference picture of each screen
 #                                (no checks), for tools\catalog.py to compare against
 #   tools\check.ps1 -Script tour_save   another script in tools\scripts (tour_save: from the saved
-#                                game in Harman's Room); its runs are kept in k7vr	our\<script>r|flat
+#                                game in Harman's Room); its runs are kept in k7vr\tour\<script>\vr|flat
 # k7vr.ini is put back as it was afterwards. The run's log and images are kept in
 # k7vr\tour\vr\ (or k7vr\tour\flat\); tools\catalog.py builds the screen catalogue from them.
 param(
