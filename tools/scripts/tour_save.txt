@@ -130,6 +130,22 @@ expect 3d 1000
 wait 1200
 screen lobby, from Harman's Room
 sweep
+# Kaede aims through a scope (the game's aim view is 35 degrees): only the (simulated) hand
+# moves, and the world must stay still in the eyes (tools\aimcheck.py).
+padhold - 0 0 0 1
+wait 2500
+screen aim (Kaede)
+hand 25 0
+wait 1200
+screen aim (Kaede), hand right
+hand -20 10
+wait 1200
+screen aim (Kaede), hand left up
+hand 0 0
+wait 1200
+screen aim (Kaede), hand back
+padhold - 0 0
+wait 1500
 hold A 3000
 wait 800
 expect 3d 1000

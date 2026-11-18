@@ -91,6 +91,10 @@ Running the game overwrites `k7vr\k7vr.log` and deletes the previous run's `pair
 code 1 on a failure), following `tools\scripts\tour.txt`: boot and title screens, the opening,
 Garcian's corridor (LT view, aim, scan, camera, map, quit prompt), the pause menu and its pages,
 the cutscene into Dan Smith's lobby, the persona list, a persona change and a junction choice.
+After the `expect` results it runs `tools\aimcheck.py` on the `<name>, hand ...` screens: while
+aiming, with the simulated head still and only the hand moved (`hand <yaw> <pitch>`), no more
+than 15% of the eye may change (the gun alone is a few percent; a world that moves with the hand
+is most of it). Both tours have such screens (Garcian in the corridor, Kaede in the lobby).
 
 - Each `expect 3d|menu|2d` in the script checks which way the frames went, that the hand-off
   didn't keep making textures, and that what the eyes or the screen panel got isn't black and

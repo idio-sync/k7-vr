@@ -507,7 +507,10 @@ void set_gun_param(const std::string& name, const float v[3]) {
 // rest of this frame's run is rewritten right away.
 static void relock_aim();
 
-constexpr float kGunRunRadius = 25;  // game units
+// Game units. The arm, gun and body behind the camera sit within ~10 (Garcian's 2.0-9.5,
+// Kaede's 2.7-6.7); the nearest world models seen while aiming are ~17 out (25 took Kaede's
+// lobby geometry into the "gun", so it moved with the hand).
+constexpr float kGunRunRadius = 12;
 
 // The bound draw's model position in eye space (the translation of its position matrix 0).
 static bool model_translation(float t[3]) {
@@ -2710,9 +2713,11 @@ static void draw_stereo(DrawFn draw) {
             return;
         }
     }
-    // In aim mode the first run of 3D draws after the clear whose models sit near the camera is
+    // In aim mode the first run of 3D draws whose models sit near the camera (kGunRunRadius) is
     // the first-person arm and gun (and the character's body behind the camera, which the grip
-    // clip removes). Shaders differ: Dan's arm and revolver use two. The world starts far out.
+    // clip removes). Shaders differ: Dan's arm and revolver use two. Farther draws before the run
+    // (Garcian's corridor starts with two at 17 units) don't end it; the first one after it does
+    // (that is the world: Kaede's lobby has geometry 17 units out, right after her body).
     bool gun = false;
     if (g_aim_mode && scene && kind == 1 && g_gun_run < 2) {
         float t[3];
@@ -2720,7 +2725,7 @@ static void draw_stereo(DrawFn draw) {
             g_gun_run = 1;
             gun = true;
             find_gun_pivot();
-        } else {
+        } else if (g_gun_run == 1) {
             const bool trace = g_gun_run == 1 && g_aim_trace > 0;
             if (trace) {  // the first world draw: the camera it was drawn with
                 ID3D11Buffer* cb0 = nullptr;

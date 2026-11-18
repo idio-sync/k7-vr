@@ -149,6 +149,16 @@ expect 3d 1000
 wait 1200
 screen aim
 sweep
+# Only the (simulated) hand moves: the world must stay still in the eyes (tools\aimcheck.py).
+hand 25 0
+wait 1200
+screen aim, hand right
+hand -20 10
+wait 1200
+screen aim, hand left up
+hand 0 0
+wait 1200
+screen aim, hand back
 padhold - 0 0 1 1
 wait 1500
 screen aim with scan

@@ -142,6 +142,19 @@ eyes. `draw_junction` (the older rectangle mapping) is the fallback for draw sha
 projection doesn't handle. Same-frame check straight ahead: Harman's Room junction ~2%, lobby
 4.9%, first junction ~10% (the faint picture under the red stripes differs, see screens.md).
 
+## Aiming: the world stays still when the hand moves (toolsimcheck.py)
+
+In aim mode the mod turns the game camera with the hand and re-places the eyes so the world
+stays where it is; only the gun moves. The first headset session (2026-11-18) found the world
+smearing with the hand, its lighting following it, as Kaede. Cause: the arm and gun are found as
+the first run of 3D draws whose models sit within `kGunRunRadius` of the camera and follow the
+hand; at 25 units Kaede's run took in lobby geometry 16.8 units out (Garcian's 2.0-9.5, Kaede's
+2.7-6.7), so part of the room moved with the hand. Now 12 units, and farther draws before the
+run (two at 17 units ahead of Garcian's arm) don't end it. Both tours check it: with the
+simulated head still, `hand <yaw> <pitch>` moves only the hand, and `toolsimcheck.py` (run by
+check.ps1 on the `<name>, hand ...` screens) fails when more than 15% of the eye changes
+(Garcian 1-11%, all of it the gun; Kaede 6-7% with her scope's sway; before the fix 39-55%).
+
 ## Rumble (src/vr/input.cpp, proxy/xinput.cpp)
 
 The game rumbles through XInputSetState (player 1, both motors the same): each shot is a short

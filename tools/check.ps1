@@ -77,5 +77,14 @@ $results += $pending
 $results | Format-Table -Wrap -AutoSize | Out-String -Width 220 | Write-Output
 $passed = @($results | Where-Object Result -eq 'pass').Count
 Write-Output "$passed of $expected checks passed, $shot of $screens screens captured ($outcome); kept in $keep"
-if ($outcome -ne 'done' -or $passed -ne $expected) { exit 1 }
+# Aiming: moving only the hand must leave the world still in the eyes (tools\aimcheck.py, on the
+# `<name>, hand ...` screens).
+$aimOk = $true
+if ($lines | Where-Object { $_ -match '^\s*screen .*, hand .+$' }) {
+    $py = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
+    & $py (Join-Path $PSScriptRoot 'aimcheck.py') $keep
+    $aimOk = $LASTEXITCODE -eq 0
+    Write-Output "aim check: $(if ($aimOk) { 'the world stays still when only the hand moves' } else { 'FAILED: the world moves with the hand' })"
+}
+if ($outcome -ne 'done' -or $passed -ne $expected -or -not $aimOk) { exit 1 }
 exit 0
