@@ -1899,6 +1899,155 @@ static void draw_game_view(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D
     scale.rescale();
 }
 
+// ---- The junction screen ----
+// At a junction the game tints a copy of the frame red over the whole screen ([vr]
+// junction_shaders: the tint's pixel shader), then draws over it: the persona's highlight,
+// windows that show the copy untinted where each path goes, their white outlines, a preview
+// inset, and the labels. All of it is screen-space 2D aimed at the game camera's picture. In the
+// eyes, the full-screen filters (the tint, the highlight) cover the whole view; everything after
+// the tint is drawn where the game camera's view lies in each eye (its rectangle there), so the
+// outlines and labels sit on the paths they point at, flat and facing the player. The windows
+// sample the frame copy at screen positions; in each eye they get a crop of that eye's own
+// picture at the rectangle instead, so what shows through them is the eye's 3D view.
+static std::vector<uint64_t> g_junction_ps;
+static bool g_junction_now;   // this frame drew the junction's tint (the junction is showing)
+static bool g_junction_shown; // ...the last frame did (logs changes)
+
+struct EyeCrop {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    UINT w = 0, h = 0;
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    unsigned frame = ~0u;
+    ID3D11Resource* src = nullptr;
+};
+static EyeCrop g_crop[2];
+
+// `src` (an eye-sized picture) cropped to rectangle `r` of it, black where `r` leaves it.
+static ID3D11ShaderResourceView* eye_crop(int eye, ID3D11Resource* src, const int r[4]) {
+    D3D11_RESOURCE_DIMENSION dim;
+    src->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return nullptr;
+    D3D11_TEXTURE2D_DESC sd;
+    static_cast<ID3D11Texture2D*>(src)->GetDesc(&sd);  // (our call: the real size)
+    const int w = r[2] - r[0], h = r[3] - r[1];
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || sd.SampleDesc.Count != 1) return nullptr;
+    EyeCrop& c = g_crop[eye];
+    if (!c.tex || c.w != UINT(w) || c.h != UINT(h) || c.fmt != sd.Format) {
+        if (c.srv) retire(c.srv);
+        if (c.rtv) retire(c.rtv);
+        if (c.tex) retire(c.tex);
+        c = EyeCrop{};
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = UINT(w), d.Height = UINT(h), d.MipLevels = 1, d.ArraySize = 1, d.Format = sd.Format;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        if (FAILED(o_CreateTexture2D(g_dev, &d, nullptr, &c.tex)) ||
+            FAILED(g_dev->CreateShaderResourceView(c.tex, nullptr, &c.srv)) ||
+            FAILED(g_dev->CreateRenderTargetView(c.tex, nullptr, &c.rtv))) {
+            if (c.srv) c.srv->Release();
+            if (c.rtv) c.rtv->Release();
+            if (c.tex) c.tex->Release();
+            c = EyeCrop{};
+            return nullptr;
+        }
+        c.w = UINT(w), c.h = UINT(h), c.fmt = sd.Format;
+    }
+    if (c.frame != g_frame || c.src != src) {
+        const float black[4] = {0, 0, 0, 1};
+        g_ctx->ClearRenderTargetView(c.rtv, black);
+        const LONG l = std::max<LONG>(r[0], 0), t = std::max<LONG>(r[1], 0);
+        const LONG rr = std::min<LONG>(r[2], LONG(sd.Width)), b = std::min<LONG>(r[3], LONG(sd.Height));
+        if (l < rr && t < b) {
+            const D3D11_BOX box{UINT(l), UINT(t), 0, UINT(rr), UINT(b), 1};
+            g_ctx->CopySubresourceRegion(c.tex, 0, UINT(l - r[0]), UINT(t - r[1]), 0, src, 0, &box);
+        }
+        c.frame = g_frame, c.src = src;
+    }
+    return c.srv;
+}
+
+// One draw of the junction's overlay into both eyes at the game view's rectangle (see above).
+// False when it can't be placed (then it is drawn as any other 2D draw).
+template <typename DrawFn>
+static bool draw_junction(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D11DepthStencilView* dsv,
+                          const ViewportScale& scale) {
+    if (!scale.active || !scale.nvp || g_gv_tan[0] <= 0 || g_gv_tan[1] <= 0 || !g_orig_w || !g_orig_h) return false;
+    uint32_t slots = 0xFFFFFFFF;
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (ps) {
+        UINT size = sizeof(slots);
+        if (FAILED(ps->GetPrivateData(kTextureSlotsGuid, &size, &slots))) slots = 0xFFFFFFFF;
+        ps->Release();
+    }
+    ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    ID3D11Resource* eye_src[kMaxTextures] = {};  // slots that read an eye-sized picture
+    g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+    for (UINT i = 0; i < kMaxTextures; ++i) {
+        if (!srv[i] || !(slots & (1u << i))) continue;
+        ID3D11Resource* res = nullptr;
+        srv[i]->GetResource(&res);
+        if (resized_info(res)) eye_src[i] = res;
+        res->Release();  // (the game keeps it alive)
+    }
+    const UINT nvp = scale.nvp, nsr = scale.nsr;
+    for (int eye = 0; eye < 2; ++eye) {
+        ID3D11RenderTargetView* trtv[kMaxTargets] = {};
+        ID3D11DepthStencilView* tdsv = dsv;
+        bool ok = true;
+        for (UINT i = 0; i < kMaxTargets; ++i)
+            if (rtv[i] && !(trtv[i] = eye ? twin_view(rtv[i], true) : rtv[i])) ok = false;
+        if (eye && dsv && !(tdsv = twin_view(dsv, true))) ok = false;
+        int r[4];
+        if (!ok || !vr::frustum_rect_unclamped(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, g_gv_tan[0],
+                                               g_gv_tan[1], int(scale.rw), int(scale.rh), r))
+            continue;
+        const float sx = float(r[2] - r[0]) / float(g_orig_w), sy = float(r[3] - r[1]) / float(g_orig_h);
+        D3D11_VIEWPORT vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+        D3D11_RECT srs[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+        for (UINT i = 0; i < nvp; ++i) {
+            const D3D11_VIEWPORT& v = scale.vp[i];
+            vps[i] = {r[0] + v.TopLeftX * sx, r[1] + v.TopLeftY * sy, v.Width * sx, v.Height * sy, v.MinDepth,
+                      v.MaxDepth};
+        }
+        for (UINT i = 0; i < nsr; ++i) {
+            const D3D11_RECT& s = scale.sr[i];
+            srs[i] = {std::clamp<LONG>(LONG(r[0] + s.left * sx), 0, LONG(scale.rw)),
+                      std::clamp<LONG>(LONG(r[1] + s.top * sy), 0, LONG(scale.rh)),
+                      std::clamp<LONG>(LONG(r[0] + s.right * sx), 0, LONG(scale.rw)),
+                      std::clamp<LONG>(LONG(r[1] + s.bottom * sy), 0, LONG(scale.rh))};
+        }
+        g_ctx->RSSetViewports(nvp, vps);
+        if (nsr) g_ctx->RSSetScissorRects(nsr, srs);
+        ID3D11ShaderResourceView* use[kMaxTextures];
+        bool swapped = false;
+        for (UINT i = 0; i < kMaxTextures; ++i) {
+            use[i] = srv[i];
+            if (eye && srv[i])
+                if (auto t = twin_view(srv[i], false)) use[i] = t, swapped = true;
+            if (!eye_src[i]) continue;
+            ID3D11Resource* src = eye_src[i];
+            if (eye)
+                if (ID3D11Texture2D* t = twin_tex(src, false)) src = t;
+            if (auto c = eye_crop(eye, src, r)) use[i] = c, swapped = true;
+        }
+        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, use);
+        g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[eye]);
+        draw();
+        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
+    }
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+    g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+    scale.rescale();
+    for (auto s : srv)
+        if (s) s->Release();
+    return true;
+}
+
 static void log_hud_draw(const char* what = "hud") {
     ID3D11PixelShader* ps = nullptr;
     g_ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -1954,8 +2103,22 @@ constexpr UINT kCoverMaxVertices = 1024;  // larger 2D draws aren't measured (ov
 // Share of the screen the bound 2D draw's extent covers (a non-indexed draw of up to
 // kCoverMaxVertices from a mapped dynamic buffer, placed by its template constants: quads, the
 // scanline effect's lines), or -1 when that can't be told.
+static float cover_of(INT first, UINT count);
 static float overlay_cover() {
     if (g_draw_first < 0 || g_draw_count == 0 || g_draw_count > kCoverMaxVertices) return -1;
+    return cover_of(g_draw_first, g_draw_count);
+}
+
+// The same for a 6-index quad too (its four vertices from the base vertex). Used only where a
+// known extent is wanted for indexed quads (the junction screen); overlay_cover keeps treating
+// indexed draws as unknown.
+static float quad_cover() {
+    if (g_draw_first >= 0) return overlay_cover();
+    if (g_draw_count != 6 || g_draw_base < 0) return -1;
+    return cover_of(g_draw_base, 4);
+}
+
+static float cover_of(INT first, UINT count) {
     ID3D11Buffer* vb = nullptr;
     UINT stride = 0, offset = 0;
     g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
@@ -1970,9 +2133,9 @@ static float overlay_cover() {
     cb0->Release();
     if (!base || stride < 8 || it == g_cb.end() || it->second.size() < kTemplateCbMin) return -1;
     static float xy[kCoverMaxVertices * 2];  // (render thread only)
-    if (!copy_xy(base + offset + size_t(g_draw_first) * stride, stride, g_draw_count, xy)) return -1;
+    if (!copy_xy(base + offset + size_t(first) * stride, stride, count, xy)) return -1;
     const float* f = reinterpret_cast<const float*>(it->second.data());
-    return vr::ortho_cover(xy, int(g_draw_count), f, f + kProjOffset / 4);
+    return vr::ortho_cover(xy, int(count), f, f + kProjOffset / 4);
 }
 
 static bool points_or_lines() {
@@ -2100,6 +2263,20 @@ static void draw_stereo(DrawFn draw) {
         draw_game_view(draw, rtv, dsv, scale);
         release_targets();
         return;
+    }
+    // The junction screen: from its tint on, the 2D draws that aren't full-screen filters go to
+    // the game view's rectangle in each eye (draw_junction), not to the HUD panel.
+    if (scene && kind == 2 && g_frame_3d) {
+        if (!g_junction_now && ps_in(g_junction_ps)) {
+            g_junction_now = true;  // (the tint itself: a full-screen filter, drawn below)
+        } else if (g_junction_now &&
+                   !(quad_cover() >= kFadeCover && scale.nvp && scale.vp[0].Width >= 0.95f * g_orig_w &&
+                     scale.vp[0].Height >= 0.95f * g_orig_h) &&  // (the inset fills its own small viewport)
+                   draw_junction(draw, rtv, dsv, scale)) {
+            draw_game_view(draw, rtv, dsv, scale);
+            release_targets();
+            return;
+        }
     }
     // HUD: textured 2D artwork and point/line overlays (sparkles, reticle lines) after the 3D
     // scene. Untextured triangle quads (dims, fades, clears) and screen-image effects stay per eye.
@@ -2245,6 +2422,7 @@ static void load_shader_list(const wchar_t* key, const wchar_t* fallback, std::v
 
 static void load_card_list() {
     load_shader_list(L"cards", L"d358d9e91e34870e", g_card_ps);
+    load_shader_list(L"junction_shaders", L"1da2b9dfa4382813", g_junction_ps);
     wchar_t mode[16];
     GetPrivateProfileStringW(L"vr", L"card_mode", L"scissor", mode, 16, path_in(L"k7vr.ini").c_str());
     g_card_skip = _wcsicmp(mode, L"skip") == 0;
@@ -2362,6 +2540,7 @@ static void STDMETHODCALLTYPE w_Draw(ID3D11DeviceContext* c, UINT count, UINT st
 
 static void STDMETHODCALLTYPE w_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT count, UINT inst, UINT start,
                                                      INT base, UINT start_inst) {
+    g_draw_base = -1;  // (quad_cover: not a single quad)
     before_draw("DrawIndexedInstanced", count, inst);
     draw_stereo([&] { real_of(c)->DrawIndexedInstanced(count, inst, start, base, start_inst); });
     after_draw();
@@ -3075,6 +3254,9 @@ static void end_frame(IDXGISwapChain* sc) {
             logf("stereo: flat frames %s", g_capture_seen ? "on (a 3D picture copied, then the scene cleared)" : "off");
         g_flat_frame = g_capture_seen;
         g_frame_persp = g_scene_copied = g_capture_seen = false;
+        if (g_junction_now != g_junction_shown) logf("stereo: junction screen %s", g_junction_now ? "on" : "off");
+        g_junction_shown = g_junction_now;
+        g_junction_now = false;
         g_prev_frame_3d = g_frame_3d;
         g_frame_3d = false;
         g_scene_vp_set = false;

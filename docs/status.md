@@ -79,23 +79,13 @@ VR-only problems found (pictures from that run are not kept in the repo):
 - **Harman's TV: fixed (see "Flat frames" below).** It was broken in VR: the persona's face
   small and seen from further off, all the text gone (empty green and yellow boxes), the Blood
   Room channel split between the HUD panel and the eyes, the dial flipping between panels.
-- **Junctions (every one): wrong.** The red striped mask with its window cut-outs and the
-  grey picture-in-picture preview are full-screen 2D draws of a copy of the eye's picture, so
-  they stay in the eyes stretched over the whole 100° view (the windows' shapes fit a 2D overlay
-  at twice the game view's size, not 3D shapes); the white outlines and labels go to the HUD
-  panel (56°). In the headset the outlines frame nothing. Same-frame check: 12-23% (flagged).
-  What was found (2026-11-17): the junction's draws run in every gameplay frame, invisible until
-  a junction shows (the mask `ps ba927d...` and four passes `ps 16706d...` are full-screen quads
-  shifted by a pixel each way; the outline lines are 32x512 / 512x32 textures; the labels are
-  text). So neither their shaders nor their geometry tell a visible junction from none (a rule on
-  the shaders made every frame flat). Needed first: a reliable "junction showing" signal,
-  probably a flag in game memory (`scanf`/`peekd`/`watch` in control.cpp). With it, either
-  draw junction frames flat (whole on the screen panel, as menus) or draw the mask, windows and
-  preview into the HUD at the game view's size from game-view copies of the frame.
+- **Junctions: fixed, in 3D (see "The junction screen" below).** They were split: the tint,
+  windows and preview stretched over the whole eye, the outlines and labels on the HUD panel at
+  about half that size, so the outlines framed nothing (same-frame check 12-23%; now 2-5%).
 - **HUD panel against the game's FOV.** The HUD panel is a fixed 56°; the game view is 60° in
-  the lobby and 42° in Harman's Room. Overlays that point into the scene (junction lines meeting
-  at the persona) line up only when the two angles match. Drawing such overlays at the game
-  view's size, or sizing the HUD panel to it each frame, would fix both this and the junctions.
+  the lobby and 42° in Harman's Room. Overlays that point into the scene line up only when the
+  two angles match. The junction's are now drawn at the game view's size in the eyes (below);
+  others (the compass, subtitles, prompts) stay on the panel, where comfort matters more.
 - **Letterboxed scenes: a 1-pixel line** in the letterbox colour (45,10,10) across the eye at
   row 136 of 2048, in every letterboxed cutscene and dialog of the run (pairs 28, 30-32, 39).
 - **Iwazaru's first dialog**: the flat picture was tinted teal, the eye wasn't (the same-frame
@@ -123,6 +113,22 @@ uses a draw's own projection now when its camera wasn't inflated (`g_own_cb`,
 `draw_proj_inflated`), so the TV's flat picture keeps the portrait's framing. None of the main
 tour's frames match the pattern (2026-11-17: 18/18, no flat frames).
 
+## The junction screen (hooks_d3d.cpp, `draw_junction`)
+
+At a junction the game tints a copy of the frame red over the whole screen (pixel shader
+`1da2b9dfa4382813`, `[vr] junction_shaders`), then draws the persona's highlight (another
+full-screen filter), a preview inset in its own small viewport, a window per path (a quad that
+shows the copy untinted, its texture coordinates are screen positions) with a white outline
+strip, and the labels. The rest of the junction's draws run in every gameplay frame, invisible;
+the tint only while a junction shows, so it switches the handling on for the rest of the frame
+(log: "stereo: junction screen on/off"). In the eyes the full-screen filters cover the whole
+view; every later 2D draw goes into both eyes at the game camera's view rectangle (its viewports
+and scissors mapped into it), never to the HUD panel, so outlines and labels sit on the paths
+they point at, flat and facing the player (at infinity: the same rectangle in each eye). Windows
+and the inset read the frame copy; in each eye they get a crop of that eye's own picture at the
+rectangle (`eye_crop`), so what shows through a window is the eye's 3D view. Same-frame check:
+Harman's Room junction 2.1%, lobby junction 4.8%.
+
 ## The save tour
 
 `tools\check.ps1 -Script tour_save` (about 3 minutes) loads the save from CONTINUE and visits
@@ -133,7 +139,7 @@ the four corners of 6-index quads.
 
 ## Next steps
 
-1. **Junctions**: find a "junction showing" signal (above), then make junction frames whole.
+1. **Headset look at a junction** (the overlay sits at infinity; the tint fills the whole view).
 2. **HUD panel vs the game's FOV** and the 1-pixel letterbox line (above).
 3. **Extend the save tour**: the fight (aim and scan before the Smile reaches you; in the tour
    so far it reached Kaede during aiming), game over, FMVs.

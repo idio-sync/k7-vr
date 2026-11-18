@@ -222,12 +222,14 @@ blends to a smooth grey in the eyes. The same-frame check flags it for that (16.
 headset whether the softened look is fine or the stripes should be kept here.
 
 ## junction choice
-Status: wrong
+Status: unsure
 
-Kaede at the first junction: "Hallway" and "Iwazaru" labels, white outlines, a red striped
-mask with window cut-outs, a picture-in-picture preview. The tour's capture still lands a
-moment early (Kaede in the lobby; holding A for 4 s more reaches the junction). Seen on
-2026-11-17 (`docs\status.md`, "Past the first junction"): the mask and the preview stay in the
-eyes stretched over the whole view, while the outlines and labels are on the HUD panel at about
-half that size, so the outlines frame nothing. Same-frame check 23%. Every junction does this;
-it is probably what looked wrong in the first headset session.
+Kaede at the first junction: "Hallway" and "Iwazaru" labels, white outlines, a red striped tint
+with a window per path, a picture-in-picture preview. Fixed 2026-11-17 and kept in 3D (see
+`docs\status.md`, "The junction screen"): the tint covers the whole view; the windows, outlines,
+preview and labels are drawn where the game camera's view lies, and each window shows that
+eye's own 3D picture untinted, so the outlines frame the paths. Before, the tint and windows
+were stretched over the whole view and the outlines sat on the HUD panel at half that size (the
+likely culprit in the first headset session). The same-frame check still flags it (11.5%): the
+faint picture under the red stripes is a magnified copy of the whole 100° view in VR, not of the
+game's 60°. Needs a headset look (the overlay sits at infinity).

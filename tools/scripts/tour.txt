@@ -302,8 +302,12 @@ wait 1200
 padhold A 0 1
 wait 300
 padhold - 0 0
-# 4 s was enough with VR off; the VR run (slowed by its captures) needs longer.
-wait 7000
+# Kaede stops short of the junction: walk on (A) until its screen shows.
+wait 3000
+hold A 4000
+wait 1500
+expect 3d 1000
+wait 1200
 screen junction choice
 sweep
 wait 500
