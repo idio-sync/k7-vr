@@ -75,6 +75,17 @@ extern "C" DWORD WINAPI K7XInputGetStateEx(DWORD user, XINPUT_STATE* state) {
 }
 
 extern "C" DWORD WINAPI K7XInputSetState(DWORD user, XINPUT_VIBRATION* vib) {
+    static bool first = true;
+    if (first) first = false, k7::logf("pad: game calls XInputSetState(%u)", user);
+    if (user == 0 && vib) {  // the game's rumble: to the VR controllers too
+        k7::vr::set_rumble(vib->wLeftMotorSpeed, vib->wRightMotorSpeed);
+        static XINPUT_VIBRATION last;
+        static int logged;
+        if ((vib->wLeftMotorSpeed != last.wLeftMotorSpeed || vib->wRightMotorSpeed != last.wRightMotorSpeed) &&
+            logged++ < 60)
+            k7::logf("pad: rumble %u %u", vib->wLeftMotorSpeed, vib->wRightMotorSpeed);
+        last = *vib;
+    }
     static auto fn = real_fn<DWORD(WINAPI*)(DWORD, XINPUT_VIBRATION*)>("XInputSetState");
     DWORD r = fn ? fn(user, vib) : ERROR_DEVICE_NOT_CONNECTED;
     if (user == 0 && r != ERROR_SUCCESS && pad_on()) r = ERROR_SUCCESS;
@@ -124,13 +135,15 @@ using GetProcAddress_t = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 static GetProcAddress_t o_GetProcAddress;
 
 static FARPROC WINAPI hk_GetProcAddress(HMODULE module, LPCSTR name) {
-    if (IS_INTRESOURCE(name) && LOWORD(reinterpret_cast<UINT_PTR>(name)) == 100) {
+    const bool state_ex = IS_INTRESOURCE(name) && LOWORD(reinterpret_cast<UINT_PTR>(name)) == 100;
+    const bool set_state = !IS_INTRESOURCE(name) && name && strcmp(name, "XInputSetState") == 0;
+    if (state_ex || set_state) {
         wchar_t path[MAX_PATH] = {};
         GetModuleFileNameW(module, path, MAX_PATH);
         _wcslwr_s(path);
         if (wcsstr(path, L"xinput")) {
-            logf("pad: game looks up XInputGetStateEx in %ls: given the mod's", path);
-            return reinterpret_cast<FARPROC>(&K7XInputGetStateEx);
+            logf("pad: game looks up %s in %ls: given the mod's", state_ex ? "XInputGetStateEx" : "XInputSetState", path);
+            return state_ex ? reinterpret_cast<FARPROC>(&K7XInputGetStateEx) : reinterpret_cast<FARPROC>(&K7XInputSetState);
         }
     }
     return o_GetProcAddress(module, name);

@@ -17,6 +17,8 @@
 #include <openvr.h>
 #include <xinput.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <mutex>
 
@@ -42,6 +44,10 @@ XINPUT_GAMEPAD g_pad;
 bool g_pad_live;  // controllers are feeding the pad
 ULONGLONG g_last_activate;
 ULONGLONG g_recenter_since;
+// The game's rumble (XInputSetState for player 1): low 16 bits the left (strong, low-frequency)
+// motor, high 16 the right (weak, high-frequency) one. Set from the game's thread.
+std::atomic<uint32_t> g_rumble{0};
+float g_rumble_scale = -1;  // [vr] rumble (read on first use)
 
 uint64_t mask(::vr::EVRButtonId id) { return ::vr::ButtonMaskFromId(id); }
 
@@ -127,6 +133,20 @@ void poll_controllers(::vr::IVRSystem* sys) {
     if (!sys) return;
     poll_hand(sys, kLeft);
     poll_hand(sys, kRight);
+    // Rumble: each motor as a haptic pulse on its hand's controller, once per frame (a pulse
+    // lasts at most 3999 us, so its length is the strength).
+    if (g_rumble_scale < 0) {
+        wchar_t buf[32];
+        GetPrivateProfileStringW(L"vr", L"rumble", L"1", buf, 32, path_in(L"k7vr.ini").c_str());
+        g_rumble_scale = std::clamp(float(_wtof(buf)), 0.f, 1.f);
+        logf("input: rumble %g", g_rumble_scale);
+    }
+    const uint32_t motors = g_rumble.load(std::memory_order_relaxed);
+    const float strength[2] = {float(motors & 0xFFFF) / 65535.f * g_rumble_scale,
+                               float(motors >> 16) / 65535.f * g_rumble_scale};
+    for (int hand = 0; hand < 2; ++hand)
+        if (g_hands[hand].device != ::vr::k_unTrackedDeviceIndexInvalid && strength[hand] > 0.02f)
+            sys->TriggerHapticPulse(g_hands[hand].device, 0, (unsigned short)(std::min(strength[hand], 1.f) * 3999));
     const XINPUT_GAMEPAD pad = build_pad();
     {
         std::lock_guard lock(g_pad_mx);
@@ -151,6 +171,10 @@ void poll_controllers(::vr::IVRSystem* sys) {
     } else {
         g_recenter_since = 0;
     }
+}
+
+void set_rumble(unsigned short left, unsigned short right) {
+    g_rumble.store(left | (uint32_t(right) << 16), std::memory_order_relaxed);
 }
 
 bool pad_state(XINPUT_GAMEPAD* out) {

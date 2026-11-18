@@ -16,6 +16,7 @@
 //   destripe = 1                blend the game's alternating 1-pixel columns in the eye and screen images
 //   hand_pitch = 0              degrees the aim direction is tilted up from the controller's -z axis
 //   hand_offset = 0,0,0         grip point in the controller's frame, metres
+//   rumble = 1                  strength of the game's rumble on the controllers, 0..1 (0 = off)
 #include <d3d11.h>
 
 #include "headmath.h"
@@ -27,6 +28,10 @@ namespace k7::vr {
 // The VR controllers as an XInput pad for the game's player 1 (input.cpp); false when no
 // controller is connected (OpenVR mode only).
 bool pad_state(_XINPUT_GAMEPAD* out);
+
+// The game's rumble for player 1 (its XInputSetState): left = the strong motor, right = the weak
+// one, 0..65535. Felt on the left and right controllers ([vr] rumble scales it, 0 = off).
+void set_rumble(unsigned short left, unsigned short right);
 
 // Matches the K7Stereo constant buffer the vertex shader patch declares (slot b12).
 struct EyeConsts {

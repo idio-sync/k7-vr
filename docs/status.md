@@ -113,7 +113,7 @@ uses a draw's own projection now when its camera wasn't inflated (`g_own_cb`,
 `draw_proj_inflated`), so the TV's flat picture keeps the portrait's framing. None of the main
 tour's frames match the pattern (2026-11-17: 18/18, no flat frames).
 
-## The junction screen (hooks_d3d.cpp, `draw_junction`)
+## The junction screen (hooks_d3d.cpp, `draw_junction_projected`)
 
 At a junction the game tints a copy of the frame red over the whole screen (pixel shader
 `1da2b9dfa4382813`, `[vr] junction_shaders`), then draws the persona's highlight (another
@@ -122,22 +122,34 @@ shows the copy untinted, its texture coordinates are screen positions) with a wh
 strip, and the labels. The rest of the junction's draws run in every gameplay frame, invisible;
 the tint only while a junction shows, so it switches the handling on for the rest of the frame
 (log: "stereo: junction screen on/off"). In the eyes the full-screen filters cover the whole
-view; every later 2D draw goes into both eyes at the game camera's view rectangle (its viewports
-and scissors mapped into it), never to the HUD panel, so outlines and labels sit on the paths
-they point at, flat and facing the player (at infinity: the same rectangle in each eye). Windows
-and the inset read the frame copy; in each eye they get a crop of that eye's own picture at the
-rectangle (`eye_crop`), so what shows through a window is the eye's 3D view. Same-frame check:
-Harman's Room junction 2.1%, lobby junction 4.8%.
+view. Every later 2D draw goes into both eyes, never to the HUD panel, as if the game's picture
+were a flat sign at infinity in front of the game camera: its vertices are mapped on the CPU
+(`vr::game_ndc_to_eye_clip`, a homography: straight lines stay straight, the sign foreshortens
+as the head turns), clipped where they fall behind the eye (and to the inset's scissor), and
+drawn with the game's own shaders over the whole eye. Outlines and labels sit on the paths they
+point at from any head direction (an earlier version stretched them into the game view's
+bounding rectangle, which blew them up when looking 45 degrees away).
 
-The windows and their outlines reach the edge of the view (`draw_junction_extended`, at the
-user's request): each window is a quad whose near corners sit by the persona and whose far
-corners lie just past the game's screen, its outline an 8-vertex strip of corner pairs. Both are
-drawn again with the game's own shaders from copies of their vertices (`g_junc_vb`), the far
-corners pushed out along the side edges (`kJuncReach`), placed so the game's transform puts
-them where draw_junction would but with the viewport over the whole eye; a window's texture
-coordinates become the eye's own pixel in the full eye copy. The preview inset and the labels
-stay at the rectangle. The junction's letterbox (an untextured draw of two full-width bars, the
-top and bottom 64 of 480 lines, `is_letterbox_bars`) is left out of the eyes.
+The windows and their outlines reach the edge of the view: each window is a quad whose near
+corners sit by the persona and whose far corners lie just past the game's screen, its outline an
+8-vertex strip of corner pairs; their far corners are pushed out along the side edges
+(`kJuncReach`). A window samples the frame copy at its screen position: in each eye its texture
+coordinates become that eye's own pixel, so its interior is the eye's 3D view. Anything else
+that reads the copy (the preview inset, which uses a grey copy) gets a crop of the eye's copy
+where the game camera's view lies (`eye_crop`). The junction's letterbox (an untextured draw of
+two full-width bars, the top and bottom 64 of 480 lines, `is_letterbox_bars`) is left out of the
+eyes. `draw_junction` (the older rectangle mapping) is the fallback for draw shapes the
+projection doesn't handle. Same-frame check straight ahead: Harman's Room junction ~2%, lobby
+4.9%, first junction ~10% (the faint picture under the red stripes differs, see screens.md).
+
+## Rumble (src/vr/input.cpp, proxy/xinput.cpp)
+
+The game rumbles through XInputSetState (player 1, both motors the same): each shot is a short
+full-strength kick, then a ramp from nothing back up over about a third of a second. The mod's
+XInputSetState passes the values on to a real pad and to `vr::set_rumble`; each frame each
+controller gets a SteamVR haptic pulse (`TriggerHapticPulse`, at most 3999 us) as long as its
+motor's strength (`[vr] rumble` scales it). Seen in the log as "pad: rumble L R". Not yet felt
+on a headset (the simulated one has no controllers).
 
 ## The save tour
 

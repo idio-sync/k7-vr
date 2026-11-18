@@ -3,7 +3,8 @@
 A VR mod for the PC version of Killer7 (Steam), through SteamVR. In the headset the 3D world is
 drawn in stereo and follows your head, the character's own gun follows your right controller
 when you aim, menus and other 2D screens appear on a large virtual screen, and the HUD floats on
-a panel in front of you. The controllers act as the game's gamepad.
+a panel in front of you. The controllers act as the game's gamepad, and the game's rumble
+(each shot's kick, for one) is felt in them.
 
 This is an early, experimental mod. It has been tested mostly with a simulated headset and in a
 few short sessions on a real one, and only through the opening of Target 00 (Angel). Expect
@@ -72,6 +73,7 @@ Under `[vr]` in `k7vr\k7vr.ini`. The ones most worth changing:
 | `hand_offset` | 0,0,0 | grip point in the controller's frame (x right, y up, z back), metres |
 | `gun_scale` | 0.6 | gun and hand size |
 | `aim_laser` | 0 | 1 draws a laser from the gun in aim mode (the game has none) |
+| `rumble` | 1 | strength of the game's rumble on the controllers, 0..1 (0 = off; the game's own Rumble option also applies) |
 
 The full list is in [docs/development.md](docs/development.md#settings).
 

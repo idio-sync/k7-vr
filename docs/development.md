@@ -145,6 +145,7 @@ The "default" column is the mod's own value when a key is missing.
 | `gun_pivot` | auto | the gun's grip in the game's aim view (x,y,z); found per character when aiming starts |
 | `gun_align` | 1 | turn the gun straight in the hand, so its barrel points where the shot goes (the game angles each gun in towards its screen centre: Dan's ~10°); 0 = held as the game holds it, the shot still following the barrel |
 | `aim_laser` | 0 | a laser from the gun in aim mode (the game has none) |
+| `rumble` | 1 | the game's rumble (its XInputSetState for player 1, both motors) as SteamVR haptic pulses on the left and right controllers, 0..1; 0 = off |
 | `no_laser_guns` | 1269 | with `aim_laser=1`: gun meshes (vertex counts, logged when aiming starts) that get no laser |
 | `aim_depth` | 1 | aim where the controller's ray meets the scene, so shots land where you point at any range (0 = at `aim_converge_m`) |
 | `aim_ignore_m` | 1.2 | surfaces nearer your eye than this don't count as the ray's hit (your gun and hand) |
