@@ -19,6 +19,7 @@ Fixed on 2026-11-17 (all pushed):
 | f47c401 | Options TV shows its text (the backdrop skip now only while 3D frames are drawn) |
 | 8e942b2 | Same-frame check compares cutscenes within their letterbox band; flags over 8% |
 | 29ac431 | Full-screen effects stay in the eyes: the static between scenes, its scanlines, frame copies drawn in strips |
+| 4dcb107 | Harman's TV whole on the screen panel with its text and portrait (flat frames); the save tour |
 
 Earlier: b1b70f6 / c9963a3 (menus whole on the screen panel; the headset hand-off fix; LT no
 longer flips to flat), 64256d2 / 0188cf3 / 4178d9d (check.ps1, tour, catalogue, look-around).
@@ -75,24 +76,22 @@ Iwazaru had been talked to.
 
 VR-only problems found (pictures from that run are not kept in the repo):
 
-- **Harman's TV, persona channels: broken.** VR off shows the persona's face close up across
-  the TV, "Serum", "Vitality", the name, a scrolling help line, a "SELECT" box and a
-  "<name> Change? Yes / No" dialog. In VR the face is small and seen from further off, and all
-  the text is gone (empty green and yellow boxes; the frames count as menus, so the screen panel
-  shows the game view without it). Likely cause, unconfirmed: the TV's picture is drawn into a
-  4:3 frame-sized target that is then mapped onto the TV mesh; `hk_CreateTexture2D` makes such
-  targets at eye size, so the portrait is drawn with the eyes' frustum and the text is taken to
-  the HUD panel instead of into the TV picture. A `capture` on the TV would settle it.
-- **Harman's TV, Blood Room channel (B):** counted as a 3D frame, so it is split: TV set, dial
-  and text on the HUD panel, the 3D room inside the TV loose in the eyes (unframed, at the game
-  view's size), the glass's scan curve stretched across the eye. Turning the dial flips between
-  this split, the HUD panel (the static) and the screen panel (channel 2 counts as a menu). The
-  eye tangent changes while on the TV (x 1.41 -> 1.59) along with the game's projection.
+- **Harman's TV: fixed (see "Flat frames" below).** It was broken in VR: the persona's face
+  small and seen from further off, all the text gone (empty green and yellow boxes), the Blood
+  Room channel split between the HUD panel and the eyes, the dial flipping between panels.
 - **Junctions (every one): wrong.** The red striped mask with its window cut-outs and the
-  grey picture-in-picture preview are full-screen 2D draws of the eye's picture, so they stay in
-  the eyes stretched over the whole 100° view; the white outlines and labels go to the HUD
-  panel (56°). In the headset the outlines frame nothing (about half the windows' size) and the
-  preview's outline is far from the preview. Same-frame check: 12-23% (flagged).
+  grey picture-in-picture preview are full-screen 2D draws of a copy of the eye's picture, so
+  they stay in the eyes stretched over the whole 100° view (the windows' shapes fit a 2D overlay
+  at twice the game view's size, not 3D shapes); the white outlines and labels go to the HUD
+  panel (56°). In the headset the outlines frame nothing. Same-frame check: 12-23% (flagged).
+  What was found (2026-11-17): the junction's draws run in every gameplay frame, invisible until
+  a junction shows (the mask `ps ba927d...` and four passes `ps 16706d...` are full-screen quads
+  shifted by a pixel each way; the outline lines are 32x512 / 512x32 textures; the labels are
+  text). So neither their shaders nor their geometry tell a visible junction from none (a rule on
+  the shaders made every frame flat). Needed first: a reliable "junction showing" signal,
+  probably a flag in game memory (`scanf`/`peekd`/`watch` in control.cpp). With it, either
+  draw junction frames flat (whole on the screen panel, as menus) or draw the mask, windows and
+  preview into the HUD at the game view's size from game-view copies of the frame.
 - **HUD panel against the game's FOV.** The HUD panel is a fixed 56°; the game view is 60° in
   the lobby and 42° in Harman's Room. Overlays that point into the scene (junction lines meeting
   at the persona) line up only when the two angles match. Drawing such overlays at the game
@@ -110,14 +109,35 @@ VR-only problems found (pictures from that run are not kept in the repo):
   (full screen in the eyes). The fight itself wasn't captured: the Smile reached Kaede during
   aiming; Kaede then has to be swapped on the TV.
 
+## Flat frames (hooks_d3d.cpp, `g_flat_frame`)
+
+Harman's TV draws its picture (the persona's portrait from its own camera, about 33°, not the
+inflated one; the channel's text) into the scene target, copies that into a frame-sized texture,
+clears the scene target and draws the copy onto the TV's curved glass inside the TV set's
+artwork. A frame that does this (a perspective draw, then a draw copying the scene target into
+another resized texture, then a clear of the scene target) makes the next frame flat: every draw
+goes into both eyes from the game camera (the FOV it meant, or the draw's own projection for
+cameras it didn't inflate), 2D draws as issued with their text, and the frame is handed off as a
+2D frame (the screen panel). The log says "stereo: flat frames on/off". The game-view pass also
+uses a draw's own projection now when its camera wasn't inflated (`g_own_cb`,
+`draw_proj_inflated`), so the TV's flat picture keeps the portrait's framing. None of the main
+tour's frames match the pattern (2026-11-17: 18/18, no flat frames).
+
+## The save tour
+
+`tools\check.ps1 -Script tour_save` (about 3 minutes) loads the save from CONTINUE and visits
+Harman's Room, the TV's channels (`expect 2d` on the Blood Room, the persona and the change
+prompt), the room's junction and back half, the lobby and its junction, the Elevator Hall; runs
+are kept in `k7vr	our	our_saver` (or `flat`). 13/13 on 2026-11-17. `capture` now also prints
+the four corners of 6-index quads.
+
 ## Next steps
 
-1. **Fix the Harman TV** (capture it first: which targets are resized, where the text goes),
-   then the junctions and the HUD panel's size against the game view (see above).
-2. **A save tour** (`tools\scripts\tour_save.txt`): from CONTINUE as above through Harman's
-   Room, the TV channels, a junction and the Elevator Hall; `expect` and `screen` steps as in
-   the tour. Then the fight (aim and scan before the Smile reaches you), game over, FMVs.
-3. **After a headset session**, fold the user's findings into `docs\screens.md` and fix what's
+1. **Junctions**: find a "junction showing" signal (above), then make junction frames whole.
+2. **HUD panel vs the game's FOV** and the 1-pixel letterbox line (above).
+3. **Extend the save tour**: the fight (aim and scan before the Smile reaches you; in the tour
+   so far it reached Kaede during aiming), game over, FMVs.
+4. **After a headset session**, fold the user's findings into `docs\screens.md` and fix what's
    wrong; add checks so fixes stay fixed.
 
 ## Working on it
