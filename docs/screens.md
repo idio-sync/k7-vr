@@ -228,7 +228,8 @@ Kaede at the first junction: "Hallway" and "Iwazaru" labels, white outlines, a r
 with a window per path, a picture-in-picture preview. Fixed 2026-11-17 and kept in 3D (see
 `docs\status.md`, "The junction screen"): the tint covers the whole view; the windows, outlines,
 preview and labels are drawn where the game camera's view lies, and each window shows that
-eye's own 3D picture untinted, so the outlines frame the paths. Before, the tint and windows
+eye's own 3D picture untinted, so the outlines frame the paths; the windows and outlines run on
+to the edge of the view. Before, the tint and windows
 were stretched over the whole view and the outlines sat on the HUD panel at half that size (the
 likely culprit in the first headset session). The same-frame check still flags it (11.5%): the
 faint picture under the red stripes is a magnified copy of the whole 100° view in VR, not of the

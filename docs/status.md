@@ -129,6 +129,15 @@ and the inset read the frame copy; in each eye they get a crop of that eye's own
 rectangle (`eye_crop`), so what shows through a window is the eye's 3D view. Same-frame check:
 Harman's Room junction 2.1%, lobby junction 4.8%.
 
+The windows and their outlines reach the edge of the view (`draw_junction_extended`, at the
+user's request): each window is a quad whose near corners sit by the persona and whose far
+corners lie just past the game's screen, its outline an 8-vertex strip of corner pairs. Both are
+drawn again with the game's own shaders from copies of their vertices (`g_junc_vb`), the far
+corners pushed out along the side edges (`kJuncReach`), placed so the game's transform puts
+them where draw_junction would but with the viewport over the whole eye; a window's texture
+coordinates become the eye's own pixel in the full eye copy. The preview inset and the labels
+stay at the rectangle.
+
 ## The save tour
 
 `tools\check.ps1 -Script tour_save` (about 3 minutes) loads the save from CONTINUE and visits

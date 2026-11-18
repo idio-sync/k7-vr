@@ -255,7 +255,7 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
     UINT stride = 0;
     // (Indexed 6-index quads: their four vertices from the base vertex.)
     const UINT shown = first_vertex >= 0 ? count : 4;
-    if (count <= 6 && (first_vertex >= 0 || (count == 6 && g_draw_base >= 0)) &&
+    if (count <= 10 && (first_vertex >= 0 || (count == 6 && g_draw_base >= 0)) &&
         read_vertices(c, UINT(first_vertex >= 0 ? first_vertex : g_draw_base), shown, f, &stride)) {
         appendf(s, " verts(stride %u)=", stride);
         for (UINT v = 0; v < shown; ++v) {
@@ -2048,6 +2048,232 @@ static bool draw_junction(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D1
     return true;
 }
 
+// Junction windows and their outlines reach the edge of the view. Each window is a quad whose
+// two near corners (v1, v2) sit by the persona and whose far corners (v0, v3) lie just past the
+// game's screen; its outline is an 8-vertex strip of corner pairs (v0..v3, each with a copy
+// offset by the line's width) along the two side edges and the near edge. Both are drawn again
+// from copies of their vertices with the far corners pushed out along the side edges, mapped
+// so that the game's own transform puts them where draw_junction would, but with the viewport
+// over the whole eye (nothing clipped at the game's screen edge). A window's texture
+// coordinates (its screen position) become that eye's own pixel in the full eye copy.
+static ID3D11Buffer* g_junc_vb;  // dynamic, our copies of a window's or outline's vertices
+constexpr UINT kJuncVbBytes = 4096;
+constexpr float kJuncReach = 12;  // far corners pushed out to this many times the side edge's length
+static float g_junc_window[8];    // the last window's corners (game screen coordinates)
+static unsigned g_junc_window_draw = ~0u;  // ...and the draw it came from
+
+// Raw bytes of `count` vertices from the game's mapped dynamic buffer (under an exception guard).
+static bool copy_vertex_bytes(const uint8_t* first, size_t bytes, uint8_t* out) {
+    __try {
+        memcpy(out, first, bytes);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The bound 2D draw's affine map from its screen coordinates to NDC (template constants: model
+// view rows at 0, projection at kProjOffset), at depth z: ndc = M * (x, y) + c.
+static bool ortho_map(float z, float m[4], float c[2]) {
+    ID3D11Buffer* cb0 = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (!cb0) return false;
+    auto it = g_cb.find(cb0);
+    cb0->Release();
+    if (it == g_cb.end() || it->second.size() < kTemplateCbMin) return false;
+    const float* mv = reinterpret_cast<const float*>(it->second.data());
+    const float* p = mv + kProjOffset / 4;
+    auto ndc = [&](float x, float y, float out[2]) {
+        float v[4];
+        for (int r = 0; r < 3; ++r) v[r] = mv[r * 4] * x + mv[r * 4 + 1] * y + mv[r * 4 + 2] * z + mv[r * 4 + 3];
+        v[3] = 1;
+        float clip[4];
+        for (int r = 0; r < 4; ++r) clip[r] = p[r * 4] * v[0] + p[r * 4 + 1] * v[1] + p[r * 4 + 2] * v[2] + p[r * 4 + 3] * v[3];
+        if (fabsf(clip[3]) < 1e-6f) return false;
+        out[0] = clip[0] / clip[3], out[1] = clip[1] / clip[3];
+        return true;
+    };
+    float o[2], ex[2], ey[2];
+    if (!ndc(0, 0, o) || !ndc(1, 0, ex) || !ndc(0, 1, ey)) return false;
+    m[0] = ex[0] - o[0], m[1] = ey[0] - o[0], m[2] = ex[1] - o[1], m[3] = ey[1] - o[1];
+    c[0] = o[0], c[1] = o[1];
+    return fabsf(m[0] * m[3] - m[1] * m[2]) > 1e-12f;
+}
+
+// Pushes far corners v0 and v3 of a junction quad out along its side edges (v1->v0, v2->v3).
+// False when the corners don't look like a window (near edge v1-v2 nearest the screen centre).
+static bool extend_window(const float in[8], float out[8]) {
+    auto d = [&](int i) { return hypotf(in[i * 2] - 320, in[i * 2 + 1] - 240); };
+    if (std::max(d(1), d(2)) >= std::min(d(0), d(3))) return false;
+    memcpy(out, in, 8 * sizeof(float));
+    for (int k = 0; k < 2; ++k) out[k] = in[2 + k] + kJuncReach * (in[k] - in[2 + k]);              // v0 from v1
+    for (int k = 0; k < 2; ++k) out[6 + k] = in[4 + k] + kJuncReach * (in[6 + k] - in[4 + k]);      // v3 from v2
+    return true;
+}
+
+// A junction window (`outline` false: a 6-index quad sampling the frame copy) or its outline
+// (an 8-vertex strip that follows the last window's corners), drawn extended into both eyes.
+// False when it isn't one (then draw_junction draws it as it is).
+static bool draw_junction_extended(bool outline, const ViewportScale& scale, ID3D11RenderTargetView* const* rtv,
+                                   ID3D11DepthStencilView* dsv) {
+    if (!scale.active || g_gv_tan[0] <= 0 || g_gv_tan[1] <= 0 || !g_orig_w || !g_orig_h) return false;
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return false;
+    auto mapped = g_vb_mapped.find(vb);
+    const uint8_t* base = mapped == g_vb_mapped.end() ? nullptr : mapped->second;
+    const INT first = outline ? g_draw_first : g_draw_base;
+    const UINT n = outline ? 8 : 4;
+    if (!base || first < 0 || stride < 12 || stride * 8 > 512 || (!outline && stride < 24)) {
+        vb->Release();
+        return false;
+    }
+    uint8_t src[8 * 64];
+    if (!copy_vertex_bytes(base + offset + size_t(first) * stride, size_t(stride) * n, src)) {
+        vb->Release();
+        return false;
+    }
+    auto pos = [&](UINT i) { return reinterpret_cast<float*>(src + size_t(i) * stride); };
+    float corners[8], ext[8];
+    if (outline) {
+        if (g_junc_window_draw + 1 != g_draws) {  // (the window is the draw just before)
+            vb->Release();
+            return false;
+        }
+        for (UINT i = 0; i < 4; ++i)
+            if (fabsf(pos(i * 2)[0] - g_junc_window[i * 2]) > 0.01f || fabsf(pos(i * 2)[1] - g_junc_window[i * 2 + 1]) > 0.01f) {
+                vb->Release();
+                return false;
+            }
+        memcpy(corners, g_junc_window, sizeof(corners));
+    } else {
+        for (UINT i = 0; i < 4; ++i) {
+            corners[i * 2] = pos(i)[0], corners[i * 2 + 1] = pos(i)[1];
+            // Texture coordinates = screen position (the copy is the whole screen).
+            if (fabsf(pos(i)[4] - pos(i)[0] / 640) > 0.02f || fabsf(pos(i)[5] - pos(i)[1] / 480) > 0.02f) {
+                vb->Release();
+                return false;
+            }
+        }
+    }
+    if (!extend_window(corners, ext)) {
+        vb->Release();
+        return false;
+    }
+    if (!outline) {
+        memcpy(g_junc_window, corners, sizeof(corners));
+        g_junc_window_draw = g_draws;
+    }
+    float m[4], c[2];
+    if (!ortho_map(pos(0)[2], m, c)) {
+        vb->Release();
+        return false;
+    }
+    const float det = m[0] * m[3] - m[1] * m[2];
+    if (!g_junc_vb) {
+        D3D11_BUFFER_DESC bd{kJuncVbBytes, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+        if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_junc_vb))) {
+            vb->Release();
+            return false;
+        }
+    }
+    // The extended corners (a window: two triangles; an outline: its strip with far pairs moved).
+    float pts[8][2];
+    UINT nout = 0;
+    uint8_t verts[8 * 64];
+    if (outline) {
+        for (UINT i = 0; i < 8; ++i) {
+            const UINT corner = i / 2;
+            memcpy(verts + i * stride, pos(i), stride);
+            const float dx = pos(i)[0] - corners[corner * 2], dy = pos(i)[1] - corners[corner * 2 + 1];
+            pts[i][0] = ext[corner * 2] + dx, pts[i][1] = ext[corner * 2 + 1] + dy;
+        }
+        nout = 8;
+    } else {
+        static const UINT order[6] = {0, 1, 2, 0, 2, 3};
+        for (UINT i = 0; i < 6; ++i) {
+            memcpy(verts + i * stride, pos(order[i]), stride);
+            pts[i][0] = ext[order[i] * 2], pts[i][1] = ext[order[i] * 2 + 1];
+        }
+        nout = 6;
+    }
+    // Save what changes.
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    uint32_t slots = 0xFFFFFFFF;
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (ps) {
+        UINT size = sizeof(slots);
+        if (FAILED(ps->GetPrivateData(kTextureSlotsGuid, &size, &slots))) slots = 0xFFFFFFFF;
+        ps->Release();
+    }
+    ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+    bool drew = false;
+    for (int eye = 0; eye < 2; ++eye) {
+        ID3D11RenderTargetView* trtv[kMaxTargets] = {};
+        ID3D11DepthStencilView* tdsv = dsv;
+        bool ok = true;
+        for (UINT i = 0; i < kMaxTargets; ++i)
+            if (rtv[i] && !(trtv[i] = eye ? twin_view(rtv[i], true) : rtv[i])) ok = false;
+        if (eye && dsv && !(tdsv = twin_view(dsv, true))) ok = false;
+        int r[4];
+        if (!ok || !vr::frustum_rect_unclamped(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, g_gv_tan[0],
+                                               g_gv_tan[1], int(scale.rw), int(scale.rh), r))
+            continue;
+        const float W = float(scale.rw), H = float(scale.rh);
+        uint8_t out[8 * 64];
+        memcpy(out, verts, size_t(nout) * stride);
+        for (UINT i = 0; i < nout; ++i) {
+            // Where draw_junction would put this point (its NDC mapped into the rectangle)...
+            const float nx = m[0] * pts[i][0] + m[1] * pts[i][1] + c[0];
+            const float ny = m[2] * pts[i][0] + m[3] * pts[i][1] + c[1];
+            const float px = r[0] + (nx + 1) / 2 * (r[2] - r[0]), py = r[1] + (1 - ny) / 2 * (r[3] - r[1]);
+            // ...as NDC over the whole eye, and back to the draw's own coordinates.
+            const float tx = px / W * 2 - 1 - c[0], ty = 1 - py / H * 2 - c[1];
+            float* v = reinterpret_cast<float*>(out + size_t(i) * stride);
+            v[0] = (m[3] * tx - m[1] * ty) / det;
+            v[1] = (-m[2] * tx + m[0] * ty) / det;
+            if (!outline) v[4] = px / W, v[5] = py / H;  // the eye's own pixel
+        }
+        D3D11_MAPPED_SUBRESOURCE ms;
+        if (FAILED(g_ctx->Map(g_junc_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) continue;
+        memcpy(ms.pData, out, size_t(nout) * stride);
+        g_ctx->Unmap(g_junc_vb, 0);
+        const UINT zero = 0;
+        g_ctx->IASetVertexBuffers(0, 1, &g_junc_vb, &stride, &zero);
+        g_ctx->IASetPrimitiveTopology(outline ? topo : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D11_VIEWPORT full{0, 0, W, H, scale.vp[0].MinDepth, scale.vp[0].MaxDepth};
+        const D3D11_RECT all{0, 0, LONG(scale.rw), LONG(scale.rh)};
+        g_ctx->RSSetViewports(1, &full);
+        g_ctx->RSSetScissorRects(1, &all);
+        ID3D11ShaderResourceView* use[kMaxTextures];
+        for (UINT i = 0; i < kMaxTextures; ++i) {
+            use[i] = srv[i];
+            if (eye && srv[i])
+                if (auto t = twin_view(srv[i], false)) use[i] = t;  // the right eye's copy
+        }
+        g_ctx->PSSetShaderResources(0, kMaxTextures, use);
+        g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[eye]);
+        g_ctx->Draw(nout, 0);
+        drew = true;
+    }
+    (void)slots;
+    g_ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+    g_ctx->IASetPrimitiveTopology(topo);
+    g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+    g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+    scale.rescale();
+    for (auto s : srv)
+        if (s) s->Release();
+    vb->Release();
+    return drew;
+}
+
 static void log_hud_draw(const char* what = "hud") {
     ID3D11PixelShader* ps = nullptr;
     g_ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -2269,13 +2495,22 @@ static void draw_stereo(DrawFn draw) {
     if (scene && kind == 2 && g_frame_3d) {
         if (!g_junction_now && ps_in(g_junction_ps)) {
             g_junction_now = true;  // (the tint itself: a full-screen filter, drawn below)
-        } else if (g_junction_now &&
-                   !(quad_cover() >= kFadeCover && scale.nvp && scale.vp[0].Width >= 0.95f * g_orig_w &&
-                     scale.vp[0].Height >= 0.95f * g_orig_h) &&  // (the inset fills its own small viewport)
-                   draw_junction(draw, rtv, dsv, scale)) {
-            draw_game_view(draw, rtv, dsv, scale);
-            release_targets();
-            return;
+        } else if (g_junction_now) {
+            const bool full_vp =
+                scale.nvp && scale.vp[0].Width >= 0.95f * g_orig_w && scale.vp[0].Height >= 0.95f * g_orig_h;
+            if (!(full_vp && quad_cover() >= kFadeCover)) {  // (full-screen filters: below; the inset fills its own viewport)
+                // Windows and their outlines reach the edge of the view (draw_junction_extended).
+                bool done = false;
+                if (full_vp && g_draw_first < 0 && g_draw_count == 6 && eye_image)
+                    done = draw_junction_extended(false, scale, rtv, dsv);
+                else if (full_vp && g_draw_first >= 0 && g_draw_count == 8 && !pixel_shader_textured())
+                    done = draw_junction_extended(true, scale, rtv, dsv);
+                if (done || draw_junction(draw, rtv, dsv, scale)) {
+                    draw_game_view(draw, rtv, dsv, scale);
+                    release_targets();
+                    return;
+                }
+            }
         }
     }
     // HUD: textured 2D artwork and point/line overlays (sparkles, reticle lines) after the 3D
