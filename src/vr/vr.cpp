@@ -57,6 +57,16 @@ void suspend_inflation(bool suspend) {
     apply_inflation();
 }
 
+// mode=auto: whether a headset is connected (asks openvr_api.dll without starting SteamVR).
+static bool hmd_present() {
+    __try {
+        return ::vr::VR_IsHmdPresent();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        logf("vr: openvr_api.dll could not be loaded");
+        return false;
+    }
+}
+
 static bool init_openvr() {
     ::vr::EVRInitError err = ::vr::VRInitError_None;
     // Delay-loaded: openvr_api.dll is only touched here.
@@ -97,10 +107,15 @@ void init(ID3D11Device* device, ID3D11DeviceContext* context) {
         set_hand_pitch(ini_float(L"hand_pitch", 0));
     }
     wchar_t m[32];
-    GetPrivateProfileStringW(L"vr", L"mode", L"off", m, 32, path_in(L"k7vr.ini").c_str());
+    GetPrivateProfileStringW(L"vr", L"mode", L"auto", m, 32, path_in(L"k7vr.ini").c_str());
     if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {  // safe mode: play flat without touching the ini
         logf("vr: Shift held at start: safe mode, VR off");
         wcscpy_s(m, L"off");
+    }
+    if (_wcsicmp(m, L"auto") == 0) {  // VR when a headset is connected, else flat
+        const bool hmd = hmd_present();
+        logf("vr: mode auto: %s", hmd ? "a headset is connected, VR on" : "no headset, playing flat");
+        wcscpy_s(m, hmd ? L"openvr" : L"off");
     }
     if (_wcsicmp(m, L"openvr") == 0) {
         g_mode = init_openvr() ? Mode::OpenVR : Mode::Off;  // safe mode: no runtime -> play flat

@@ -33,14 +33,29 @@ The game addresses the mod relies on are documented where they're used (`aim.cpp
 `build.cmd` configures and builds the 32-bit DLL into `out\` with MSVC (Visual Studio 18 Build
 Tools, x86, through `vcvars32.bat`), CMake and Ninja (expected at `C:\ninja.exe`). It produces
 `out\XINPUT1_3.dll` and copies `openvr_api.dll` next to it. The OpenVR import is delay-loaded,
-so `openvr_api.dll` is only loaded with `[vr] mode=openvr`.
+so `openvr_api.dll` is only loaded when VR is wanted (`[vr] mode=auto` asks it whether a headset
+is connected; `mode=off` never loads it). The version (`git describe` at configure time) is the
+first line of `k7vr.log`; reconfigure (delete `out\`) to refresh it in local builds.
 
 Unit tests: `ctest --test-dir out` (head/aim math, the VR profile's ini rewrite) and
 `python -m unittest discover -s tests -p "test_*.py"` (the image checks; needs numpy and
 Pillow, as do `tools\catalog.py` and `tools\imagechecks.py`).
 
-To install into a real game folder, see the [README](../README.md#install).
-`tools\install_game.ps1` takes `-From <dir>` to install DLLs from somewhere other than `out\`.
+To try a build in your own game folder, copy `out\XINPUT1_3.dll` and `out\openvr_api.dll` next
+to `Killer7Win.exe` (exact file-name case: some Steam library drives are case-sensitive).
+
+## Releases
+
+`.github/workflows/build.yml` builds the DLL on every push and pull request (MSVC x86, CMake,
+Ninja), runs the unit tests and uploads the zip as a build artifact. Pushing a tag `vX.Y.Z` does
+the same and publishes a GitHub Release with the zip and its SHA-256 (a pre-release while the
+version is 0.x). The zip extracts into the game folder: `XINPUT1_3.dll`, `openvr_api.dll`, and
+`k7vr\` with `README.txt`, `LICENSE.txt` (the mod's, MIT) and `LICENSE-openvr.txt`.
+
+Before tagging (CI can't run the game): both tours pass (`tools\check.ps1` and
+`tools\check.ps1 -Script tour_save`), a short headset session (menus, a junction, aiming,
+rumble), the README's known issues are current. Then `git tag v0.1.0` and `git push origin
+v0.1.0`.
 
 ## The test copy
 
@@ -130,7 +145,7 @@ The "default" column is the mod's own value when a key is missing.
 
 | key | default | what |
 |---|---|---|
-| `mode` | off | `openvr` (VR through SteamVR; the installer writes this), `sim` (the simulated headset, for testing) or `off` (flat). Shift held at start, or SteamVR failing to start, also means off |
+| `mode` | auto | `auto` (OpenVR when `VR_IsHmdPresent` says a headset is connected, else flat), `openvr` (always VR through SteamVR), `sim` (the simulated headset, for testing) or `off` (flat). Shift held at start, or SteamVR failing to start, also means off |
 | `unit_m` | 0.25 | metres per game unit (world size) |
 | `ipd_m` | 0.064 | the simulated headset's eye separation (OpenVR uses the headset's) |
 | `sim_fov` | 100 | the simulated headset's vertical field of view, degrees |

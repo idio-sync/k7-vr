@@ -1,0 +1,95 @@
+# Builds the mod (32-bit XINPUT1_3.dll) and runs the unit tests on every push and pull request,
+# keeping the zip as a build artifact. A pushed tag vX.Y.Z also publishes it as a GitHub Release
+# (a pre-release while the version is 0.x). CI can't run the game: see docs/development.md,
+# "Releases", for the checks to do before tagging.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags, for the version in the log
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Ninja
+        shell: pwsh
+        run: if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { choco install ninja --no-progress -y }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=cl
+          cmake --build out
+
+      - name: Unit tests
+        shell: pwsh
+        run: ctest --test-dir out --output-on-failure
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Image-check tests
+        shell: pwsh
+        run: |
+          python -m pip install --quiet numpy pillow
+          python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $version = git describe --tags --always
+          $root = 'dist\killer7-vr'
+          New-Item -ItemType Directory -Force "$root\k7vr" | Out-Null
+          Copy-Item out\XINPUT1_3.dll, out\openvr_api.dll $root
+          Copy-Item packaging\README.txt "$root\k7vr\README.txt"
+          Copy-Item LICENSE "$root\k7vr\LICENSE.txt"
+          Copy-Item third_party\openvr\LICENSE "$root\k7vr\LICENSE-openvr.txt"
+          $zip = "killer7-vr-$version.zip"
+          Compress-Archive -Path "$root\*" -DestinationPath "dist\$zip"
+          $hash = (Get-FileHash "dist\$zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist\$zip.sha256" -Value "$hash  $zip" -Encoding ascii
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: killer7-vr
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: killer7-vr
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}

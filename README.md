@@ -21,27 +21,26 @@ rough edges (see [Known issues](#known-issues)).
 ## Requirements
 
 - Killer7 for PC (Steam) on Windows; SteamVR, a headset and two motion controllers.
-- No prebuilt releases yet: build from source with the Visual Studio Build Tools (x86 C++),
-  CMake and Ninja ([docs/development.md](docs/development.md#building)).
 
 ## Install
 
-1. Build `out\XINPUT1_3.dll` with `build.cmd`.
-2. Close the game, then from the repo run
-   `powershell -File tools\install_game.ps1 -Game "<your Killer7 folder>"` (the folder with
-   `Killer7Win.exe`). It adds `XINPUT1_3.dll`, `openvr_api.dll` (any different copies already
-   there are kept as `*.k7vr-backup`) and a `k7vr\` folder with the settings, `k7vr.ini`, and
-   the log, `k7vr.log`. Your saves, your `killer7.ini` and the game's shader cache are untouched.
-3. Start SteamVR, then the game as usual. Sit facing forward; hold both stick clicks for a second
-   to recentre.
+1. Download the zip from the [Releases](https://github.com/idio-sync/k7-vr/releases) page.
+2. Extract it into the game folder, the one with `Killer7Win.exe` (in Steam: right-click
+   Killer7, Manage, Browse local files). That puts `XINPUT1_3.dll` and `openvr_api.dll` next to
+   the game, and a `k7vr` folder with the license files.
+3. Start the game as usual with the headset connected. VR turns on by itself (SteamVR starts if
+   it isn't running); without a headset the game plays flat. Sit facing forward; hold both stick
+   clicks for a second to recentre.
 
-- **Play flat:** hold Shift while the game starts, or set `mode=off` in `k7vr\k7vr.ini`. If
-  SteamVR can't start, the game also runs flat.
+- **Play flat:** hold Shift while the game starts, or set `mode=off` in `k7vr\k7vr.ini`.
+- **Settings and log:** `k7vr\k7vr.ini` (created on the first start, every setting commented
+  out) and `k7vr\k7vr.log`.
 - **Key bindings:** in VR the game reads its settings from `k7vr\killer7.ini`, a copy of your
   `killer7.ini` (refreshed whenever yours changes) with the bindings the mod needs. Your own
-  file is only read.
-- **Uninstall:** `powershell -File tools\install_game.ps1 -Game "<folder>" -Uninstall` puts any
-  backed-up DLLs back; add `-Purge` to also delete `k7vr\`.
+  file and your saves are untouched.
+- **Other mods:** another mod that also uses `XINPUT1_3.dll` can't be installed alongside.
+- **Uninstall:** delete `XINPUT1_3.dll`, `openvr_api.dll` and the `k7vr` folder from the game
+  folder.
 
 ## Controls
 
@@ -65,7 +64,7 @@ Under `[vr]` in `k7vr\k7vr.ini`. The ones most worth changing:
 
 | key | default | what |
 |---|---|---|
-| `mode` | openvr (as installed) | `off` plays flat |
+| `mode` | auto | `auto` = VR when a headset is connected, `openvr` = always VR, `off` = play flat |
 | `eye_scale` | 1.0 | eye image size as a multiple of SteamVR's recommended size (try 0.8 if it stutters) |
 | `unit_m` | 0.25 | metres per game unit (world size) |
 | `destripe` | 1 | blend the game's alternating 1-pixel columns (0 shows fine vertical lines) |

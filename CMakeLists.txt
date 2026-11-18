@@ -35,6 +35,15 @@ add_library(k7vr SHARED
     src/proxy/xinput.cpp)
 set_target_properties(k7vr PROPERTIES OUTPUT_NAME XINPUT1_3)
 target_compile_definitions(k7vr PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
+# The version, first line of k7vr.log: `git describe` at configure time (a release's tag).
+find_package(Git QUIET)
+set(K7VR_VERSION "unknown")
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} OUTPUT_VARIABLE K7VR_VERSION
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+target_compile_definitions(k7vr PRIVATE K7VR_VERSION="${K7VR_VERSION}")
 target_compile_options(k7vr PRIVATE /W4 /wd4100 /utf-8)
 target_link_libraries(k7vr PRIVATE d3d11 dxgi ole32 windowscodecs uuid)
 # OpenVR (32-bit 2.15.6), delay-loaded: openvr_api.dll is only loaded when [vr] mode=openvr.
