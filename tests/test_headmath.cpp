@@ -178,6 +178,41 @@ static void test_frustum_rect_unclamped() {
     }
 }
 
+static void test_game_ndc_to_eye_clip() {
+    float head[12];
+    float px[4], py[4];
+    projection_rows(-0.6f, 0.6f, -0.5f, 0.5f, px, py);
+    // Turned 30 degrees right: the game picture's corners land where frustum_rect_unclamped
+    // puts its rectangle's edges (left and right corners, top and bottom).
+    eye_space_transform(rotation_yaw_pitch(0.5236f, 0), 0.25f, head);
+    int r[4];
+    frustum_rect_unclamped(head, px, py, 0.6f, 0.5f, 1920, 1440, r);
+    float c[3];
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, -1, 0, c);
+    CHECK_NEAR((c[0] / c[2] * 0.5 + 0.5) * 1920, r[0], 2);
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, 1, 0, c);
+    CHECK_NEAR((c[0] / c[2] * 0.5 + 0.5) * 1920, r[2], 2);
+    // The picture's centre, straight ahead of the game camera: 30 degrees left of the eye's.
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, 0, 0, c);
+    CHECK_NEAR(c[0] / c[2], std::tan(-0.5236) / 0.6, 1e-3);
+    CHECK_NEAR(c[1] / c[2], 0, 1e-4);
+    // A straight edge of the picture stays straight (a homography): the midpoint of the top edge
+    // lies on the line through the projected top corners.
+    float a[3], b[3], m[3];
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, -1, 1, a);
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, 1, 1, b);
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, 0, 1, m);
+    const double ax = a[0] / a[2], ay = a[1] / a[2], bx = b[0] / b[2], by = b[1] / b[2], mx = m[0] / m[2], my = m[1] / m[2];
+    CHECK_NEAR((bx - ax) * (my - ay) - (by - ay) * (mx - ax), 0, 1e-4);
+    // Turned 120 degrees: the picture's centre is behind the eye (w <= 0).
+    eye_space_transform(rotation_yaw_pitch(2.1f, 0), 0.25f, head);
+    game_ndc_to_eye_clip(head, px, py, 0.6f, 0.5f, 0, 0, c);
+    if (c[2] > 0) {
+        std::printf("turned 120: the picture's centre should be behind the eye, w = %f\n", c[2]);
+        ++g_failures;
+    }
+}
+
 static void test_ortho_quad_cover() {
     // The game's 2D draws: 640x480 positions, identity model-view (z -300), this projection.
     const float mv0[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -300};
@@ -201,6 +236,7 @@ static void test_ortho_quad_cover() {
 int main() {
     test_ortho_quad_cover();
     test_frustum_rect_unclamped();
+    test_game_ndc_to_eye_clip();
     test_aim_angles_match_probe();
     test_world_lock_keeps_world_still();
     test_frustum_scissor();

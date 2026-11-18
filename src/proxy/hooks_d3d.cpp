@@ -7,6 +7,7 @@
 #include <psapi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -2048,19 +2049,9 @@ static bool draw_junction(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D1
     return true;
 }
 
-// Junction windows and their outlines reach the edge of the view. Each window is a quad whose
-// two near corners (v1, v2) sit by the persona and whose far corners (v0, v3) lie just past the
-// game's screen; its outline is an 8-vertex strip of corner pairs (v0..v3, each with a copy
-// offset by the line's width) along the two side edges and the near edge. Both are drawn again
-// from copies of their vertices with the far corners pushed out along the side edges, mapped
-// so that the game's own transform puts them where draw_junction would, but with the viewport
-// over the whole eye (nothing clipped at the game's screen edge). A window's texture
-// coordinates (its screen position) become that eye's own pixel in the full eye copy.
-static ID3D11Buffer* g_junc_vb;  // dynamic, our copies of a window's or outline's vertices
-constexpr UINT kJuncVbBytes = 4096;
-constexpr float kJuncReach = 12;  // far corners pushed out to this many times the side edge's length
-static float g_junc_window[8];    // the last window's corners (game screen coordinates)
-static unsigned g_junc_window_draw = ~0u;  // ...and the draw it came from
+// Junction windows and their outlines reach the edge of the view (draw_junction_projected):
+// far corners pushed out to this many times the side edge's length.
+constexpr float kJuncReach = 12;
 
 // Raw bytes of `count` vertices from the game's mapped dynamic buffer (under an exception guard).
 static bool copy_vertex_bytes(const uint8_t* first, size_t bytes, uint8_t* out) {
@@ -2148,96 +2139,148 @@ static bool is_letterbox_bars() {
     return true;
 }
 
-// A junction window (`outline` false: a 6-index quad sampling the frame copy) or its outline
-// (an 8-vertex strip that follows the last window's corners), drawn extended into both eyes.
-// False when it isn't one (then draw_junction draws it as it is).
-static bool draw_junction_extended(bool outline, const ViewportScale& scale, ID3D11RenderTargetView* const* rtv,
-                                   ID3D11DepthStencilView* dsv) {
-    if (!scale.active || g_gv_tan[0] <= 0 || g_gv_tan[1] <= 0 || !g_orig_w || !g_orig_h) return false;
+// One 2D draw of the junction's overlay, into both eyes as if the game's picture were a flat
+// sign at infinity in front of the game camera (vr::game_ndc_to_eye_clip): its vertices are
+// mapped on the CPU (straight lines stay straight, the sign foreshortens as the head turns, what
+// lies behind the eye is clipped off) and drawn with the game's own shaders over the whole eye.
+// Windows and their outlines also reach the edge of the view: each window is a quad whose near
+// corners (v1, v2) sit by the persona and whose far corners (v0, v3) lie just past the game's
+// screen; its outline is an 8-vertex strip of corner pairs (v0..v3, each with a copy offset by
+// the line's width). Their far corners are pushed out along the side edges. A window samples
+// the frame copy at its screen position: in each eye it reads that eye's own pixel there, so its
+// interior is the eye's 3D view; anything else that samples the copy (the preview inset) gets a
+// crop of the eye's copy where the game camera's view lies. False when the draw isn't one this
+// understands (then draw_junction).
+static ID3D11Buffer* g_junc_vb;  // dynamic: the mapped vertices
+constexpr UINT kJuncVbBytes = 64 * 1024;
+static float g_junc_window[8];    // the last window's corners (game screen coordinates)
+static unsigned g_junc_window_draw = ~0u;  // ...and the draw it came from
+
+struct JVert {
+    float u, v;         // the game picture's NDC (full frame, y up)
+    float cx, cy, cw;   // this eye's clip space
+    float z;            // the draw's own z
+    uint8_t raw[64];    // the vertex as the game wrote it
+};
+
+static bool draw_junction_projected(bool eye_image, const ViewportScale& scale, ID3D11RenderTargetView* const* rtv,
+                                    ID3D11DepthStencilView* dsv) {
+    if (!scale.active || !scale.nvp || g_gv_tan[0] <= 0 || g_gv_tan[1] <= 0 || !g_orig_w || !g_orig_h) return false;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    const bool indexed = g_draw_first < 0;
+    if (indexed && !(g_draw_count == 6 && g_draw_base >= 0 && topo == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)) return false;
+    if (!indexed && (g_draw_count == 0 || g_draw_count > 64)) return false;
+    const bool lines = topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST || topo == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    if (!lines && topo != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST && topo != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
+        return false;
     ID3D11Buffer* vb = nullptr;
     UINT stride = 0, offset = 0;
     g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
     if (!vb) return false;
     auto mapped = g_vb_mapped.find(vb);
     const uint8_t* base = mapped == g_vb_mapped.end() ? nullptr : mapped->second;
-    const INT first = outline ? g_draw_first : g_draw_base;
-    const UINT n = outline ? 8 : 4;
-    if (!base || first < 0 || stride < 12 || stride * 8 > 512 || (!outline && stride < 24)) {
+    const UINT n = indexed ? 4 : g_draw_count;
+    static uint8_t src[64 * 64];
+    if (!base || stride < 12 || stride > 64 ||
+        !copy_vertex_bytes(base + offset + size_t(indexed ? g_draw_base : g_draw_first) * stride, size_t(stride) * n, src)) {
         vb->Release();
         return false;
     }
-    uint8_t src[8 * 64];
-    if (!copy_vertex_bytes(base + offset + size_t(first) * stride, size_t(stride) * n, src)) {
-        vb->Release();
-        return false;
-    }
-    auto pos = [&](UINT i) { return reinterpret_cast<float*>(src + size_t(i) * stride); };
-    float corners[8], ext[8];
-    if (outline) {
-        if (g_junc_window_draw + 1 != g_draws) {  // (the window is the draw just before)
-            vb->Release();
-            return false;
-        }
-        for (UINT i = 0; i < 4; ++i)
-            if (fabsf(pos(i * 2)[0] - g_junc_window[i * 2]) > 0.01f || fabsf(pos(i * 2)[1] - g_junc_window[i * 2 + 1]) > 0.01f) {
-                vb->Release();
-                return false;
-            }
-        memcpy(corners, g_junc_window, sizeof(corners));
+    auto at = [&](UINT i) { return reinterpret_cast<float*>(src + size_t(i) * stride); };
+    // Primitives (vertex indices): an indexed quad's two triangles, strips unrolled (winding kept).
+    std::vector<std::array<UINT, 3>> tris;
+    std::vector<std::array<UINT, 2>> segs;
+    if (indexed) {
+        tris = {{0, 1, 2}, {0, 2, 3}};
+    } else if (topo == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
+        for (UINT i = 0; i + 2 < n; i += 3) tris.push_back({i, i + 1, i + 2});
+    } else if (topo == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP) {
+        for (UINT i = 0; i + 2 < n; ++i) tris.push_back(i % 2 ? std::array<UINT, 3>{i + 1, i, i + 2} : std::array<UINT, 3>{i, i + 1, i + 2});
+    } else if (topo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST) {
+        for (UINT i = 0; i + 1 < n; i += 2) segs.push_back({i, i + 1});
     } else {
-        for (UINT i = 0; i < 4; ++i) {
-            corners[i * 2] = pos(i)[0], corners[i * 2 + 1] = pos(i)[1];
-            // Texture coordinates = screen position (the copy is the whole screen).
-            if (fabsf(pos(i)[4] - pos(i)[0] / 640) > 0.02f || fabsf(pos(i)[5] - pos(i)[1] / 480) > 0.02f) {
-                vb->Release();
-                return false;
-            }
+        for (UINT i = 0; i + 1 < n; ++i) segs.push_back({i, i + 1});
+    }
+    const bool full_vp = scale.vp[0].Width >= 0.95f * g_orig_w && scale.vp[0].Height >= 0.95f * g_orig_h;
+    // Positions (game screen coordinates), windows and outlines pushed out.
+    std::vector<float> xy(size_t(n) * 2);
+    for (UINT i = 0; i < n; ++i) xy[i * 2] = at(i)[0], xy[i * 2 + 1] = at(i)[1];
+    const bool window = indexed && eye_image && full_vp && stride >= 24;
+    bool outline = false;
+    if (window) {
+        float corners[8], ext[8];
+        for (UINT i = 0; i < 8; ++i) corners[i] = xy[i];
+        bool screen_uv = true;  // texture coordinates = screen position (the copy is the whole screen)
+        for (UINT i = 0; i < 4; ++i)
+            if (fabsf(at(i)[4] - at(i)[0] / 640) > 0.02f || fabsf(at(i)[5] - at(i)[1] / 480) > 0.02f) screen_uv = false;
+        if (screen_uv && extend_window(corners, ext)) {
+            memcpy(g_junc_window, corners, sizeof(corners));
+            g_junc_window_draw = g_draws;
+            for (UINT i = 0; i < 8; ++i) xy[i] = ext[i];
         }
-    }
-    if (!extend_window(corners, ext)) {
-        vb->Release();
-        return false;
-    }
-    if (!outline) {
-        memcpy(g_junc_window, corners, sizeof(corners));
-        g_junc_window_draw = g_draws;
+    } else if (!indexed && n == 8 && full_vp && topo == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP &&
+               g_junc_window_draw + 1 == g_draws) {
+        outline = true;
+        for (UINT i = 0; i < 4; ++i)
+            if (fabsf(xy[i * 4] - g_junc_window[i * 2]) > 0.01f || fabsf(xy[i * 4 + 1] - g_junc_window[i * 2 + 1]) > 0.01f)
+                outline = false;
+        float ext[8];
+        if (outline && extend_window(g_junc_window, ext))
+            for (UINT i = 0; i < 8; ++i) {
+                const UINT corner = i / 2;
+                xy[i * 2] = ext[corner * 2] + (at(i)[0] - g_junc_window[corner * 2]);
+                xy[i * 2 + 1] = ext[corner * 2 + 1] + (at(i)[1] - g_junc_window[corner * 2 + 1]);
+            }
     }
     float m[4], c[2];
-    if (!ortho_map(pos(0)[2], m, c)) {
+    if (!ortho_map(at(0)[2], m, c)) {
         vb->Release();
         return false;
     }
     const float det = m[0] * m[3] - m[1] * m[2];
-    if (!g_junc_vb) {
-        D3D11_BUFFER_DESC bd{kJuncVbBytes, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
-        if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_junc_vb))) {
-            vb->Release();
-            return false;
-        }
+    // The draw's NDC (over its viewport) -> the game picture's NDC (over the whole frame).
+    const D3D11_VIEWPORT& gvp = scale.vp[0];
+    const float su = gvp.Width / g_orig_w, ou = (2 * gvp.TopLeftX + gvp.Width) / g_orig_w - 1;
+    const float sv = gvp.Height / g_orig_h, ov = 1 - (2 * gvp.TopLeftY + gvp.Height) / g_orig_h;
+    // A sub-viewport's scissor (the preview inset) as a rectangle of the picture's NDC.
+    bool scissor = false;
+    float s_u0 = -1, s_u1 = 1, s_v0 = -1, s_v1 = 1;
+    if (!full_vp && scale.nsr) {
+        const D3D11_RECT& s = scale.sr[0];
+        s_u0 = 2.f * s.left / g_orig_w - 1, s_u1 = 2.f * s.right / g_orig_w - 1;
+        s_v0 = 1 - 2.f * s.bottom / g_orig_h, s_v1 = 1 - 2.f * s.top / g_orig_h;
+        scissor = true;
     }
-    // The extended corners (a window: two triangles; an outline: its strip with far pairs moved).
-    float pts[8][2];
-    UINT nout = 0;
-    uint8_t verts[8 * 64];
-    if (outline) {
-        for (UINT i = 0; i < 8; ++i) {
-            const UINT corner = i / 2;
-            memcpy(verts + i * stride, pos(i), stride);
-            const float dx = pos(i)[0] - corners[corner * 2], dy = pos(i)[1] - corners[corner * 2 + 1];
-            pts[i][0] = ext[corner * 2] + dx, pts[i][1] = ext[corner * 2 + 1] + dy;
+    // Vertex fields to blend along clipped edges: floats, except a packed colour at offset 12.
+    const int color_slot = (stride == 16 || stride == 24 || stride == 28 || stride == 32) ? 3 : -1;
+    auto lerp = [&](const JVert& a, const JVert& b, float t) {
+        JVert o;
+        o.u = a.u + (b.u - a.u) * t, o.v = a.v + (b.v - a.v) * t;
+        o.cx = a.cx + (b.cx - a.cx) * t, o.cy = a.cy + (b.cy - a.cy) * t, o.cw = a.cw + (b.cw - a.cw) * t;
+        o.z = a.z + (b.z - a.z) * t;
+        for (UINT k = 0; k < stride / 4; ++k) {
+            float fa, fb;
+            memcpy(&fa, a.raw + k * 4, 4);
+            memcpy(&fb, b.raw + k * 4, 4);
+            const float f = int(k) == color_slot ? fa : fa + (fb - fa) * t;
+            memcpy(o.raw + k * 4, &f, 4);
         }
-        nout = 8;
-    } else {
-        static const UINT order[6] = {0, 1, 2, 0, 2, 3};
-        for (UINT i = 0; i < 6; ++i) {
-            memcpy(verts + i * stride, pos(order[i]), stride);
-            pts[i][0] = ext[order[i] * 2], pts[i][1] = ext[order[i] * 2 + 1];
+        return o;
+    };
+    // Clips a polygon against plane f(v) >= 0 (f linear along edges).
+    auto clip_poly = [&](std::vector<JVert>& poly, auto&& f) {
+        std::vector<JVert> out;
+        for (size_t i = 0; i < poly.size(); ++i) {
+            const JVert& a = poly[i];
+            const JVert& b = poly[(i + 1) % poly.size()];
+            const float fa = f(a), fb = f(b);
+            if (fa >= 0) out.push_back(a);
+            if ((fa >= 0) != (fb >= 0)) out.push_back(lerp(a, b, fa / (fa - fb)));
         }
-        nout = 6;
-    }
+        poly.swap(out);
+    };
     // Save what changes.
-    D3D11_PRIMITIVE_TOPOLOGY topo;
-    g_ctx->IAGetPrimitiveTopology(&topo);
     uint32_t slots = 0xFFFFFFFF;
     ID3D11PixelShader* ps = nullptr;
     g_ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -2247,8 +2290,28 @@ static bool draw_junction_extended(bool outline, const ViewportScale& scale, ID3
         ps->Release();
     }
     ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    ID3D11Resource* eye_src[kMaxTextures] = {};
     g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+    for (UINT i = 0; i < kMaxTextures; ++i) {
+        if (!srv[i] || !(slots & (1u << i))) continue;
+        ID3D11Resource* res = nullptr;
+        srv[i]->GetResource(&res);
+        if (resized_info(res)) eye_src[i] = res;
+        res->Release();
+    }
+    if (!g_junc_vb) {
+        D3D11_BUFFER_DESC bd{kJuncVbBytes, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+        if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_junc_vb))) {
+            for (auto s : srv)
+                if (s) s->Release();
+            vb->Release();
+            return false;
+        }
+    }
+    const float W = float(scale.rw), H = float(scale.rh);
+    constexpr float kNear = 1e-3f;
     bool drew = false;
+    std::vector<uint8_t> out;
     for (int eye = 0; eye < 2; ++eye) {
         ID3D11RenderTargetView* trtv[kMaxTargets] = {};
         ID3D11DepthStencilView* tdsv = dsv;
@@ -2256,49 +2319,106 @@ static bool draw_junction_extended(bool outline, const ViewportScale& scale, ID3
         for (UINT i = 0; i < kMaxTargets; ++i)
             if (rtv[i] && !(trtv[i] = eye ? twin_view(rtv[i], true) : rtv[i])) ok = false;
         if (eye && dsv && !(tdsv = twin_view(dsv, true))) ok = false;
-        int r[4];
-        if (!ok || !vr::frustum_rect_unclamped(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, g_gv_tan[0],
-                                               g_gv_tan[1], int(scale.rw), int(scale.rh), r))
+        if (!ok) continue;
+        std::vector<JVert> verts(n);
+        for (UINT i = 0; i < n; ++i) {
+            JVert& jv = verts[i];
+            const float dx = m[0] * xy[i * 2] + m[1] * xy[i * 2 + 1] + c[0];
+            const float dy = m[2] * xy[i * 2] + m[3] * xy[i * 2 + 1] + c[1];
+            jv.u = dx * su + ou, jv.v = dy * sv + ov;
+            float clip[3];
+            vr::game_ndc_to_eye_clip(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, g_gv_tan[0], g_gv_tan[1], jv.u,
+                                     jv.v, clip);
+            jv.cx = clip[0], jv.cy = clip[1], jv.cw = clip[2];
+            jv.z = at(i)[2];
+            memcpy(jv.raw, src + size_t(i) * stride, stride);
+        }
+        out.clear();
+        auto emit = [&](const JVert& jv) {
+            uint8_t v[64];
+            memcpy(v, jv.raw, stride);
+            float* f = reinterpret_cast<float*>(v);
+            const float nx = jv.cx / jv.cw, ny = jv.cy / jv.cw;  // this eye's NDC (the viewport is the whole eye)
+            const float tx = nx - c[0], ty = ny - c[1];
+            f[0] = (m[3] * tx - m[1] * ty) / det;
+            f[1] = (-m[2] * tx + m[0] * ty) / det;
+            f[2] = jv.z;
+            if (window) f[4] = (nx + 1) / 2, f[5] = (1 - ny) / 2;  // the eye's own pixel
+            out.insert(out.end(), v, v + stride);
+        };
+        auto fit = [&](std::vector<JVert>& poly) {
+            if (scissor) {
+                clip_poly(poly, [&](const JVert& p) { return p.u - s_u0; });
+                clip_poly(poly, [&](const JVert& p) { return s_u1 - p.u; });
+                clip_poly(poly, [&](const JVert& p) { return p.v - s_v0; });
+                clip_poly(poly, [&](const JVert& p) { return s_v1 - p.v; });
+            }
+            clip_poly(poly, [&](const JVert& p) { return p.cw - kNear; });
+        };
+        for (const auto& t : tris) {
+            std::vector<JVert> poly = {verts[t[0]], verts[t[1]], verts[t[2]]};
+            fit(poly);
+            for (size_t k = 1; k + 1 < poly.size(); ++k) emit(poly[0]), emit(poly[k]), emit(poly[k + 1]);
+        }
+        for (const auto& s : segs) {
+            JVert a = verts[s[0]], b = verts[s[1]];
+            auto cut = [&](auto&& f) {  // keeps the part of segment a-b where f >= 0
+                const float fa = f(a), fb = f(b);
+                if (fa < 0 && fb < 0) return false;
+                if (fa < 0) a = lerp(a, b, fa / (fa - fb));
+                else if (fb < 0) b = lerp(a, b, fa / (fa - fb));
+                return true;
+            };
+            if (scissor && !(cut([&](const JVert& p) { return p.u - s_u0; }) && cut([&](const JVert& p) { return s_u1 - p.u; }) &&
+                             cut([&](const JVert& p) { return p.v - s_v0; }) && cut([&](const JVert& p) { return s_v1 - p.v; })))
+                continue;
+            if (!cut([&](const JVert& p) { return p.cw - kNear; })) continue;
+            emit(a), emit(b);
+        }
+        if (out.empty() || out.size() > kJuncVbBytes) {
+            drew = true;  // (all of it behind the eye or outside the inset: nothing to draw in this eye)
             continue;
-        const float W = float(scale.rw), H = float(scale.rh);
-        uint8_t out[8 * 64];
-        memcpy(out, verts, size_t(nout) * stride);
-        for (UINT i = 0; i < nout; ++i) {
-            // Where draw_junction would put this point (its NDC mapped into the rectangle)...
-            const float nx = m[0] * pts[i][0] + m[1] * pts[i][1] + c[0];
-            const float ny = m[2] * pts[i][0] + m[3] * pts[i][1] + c[1];
-            const float px = r[0] + (nx + 1) / 2 * (r[2] - r[0]), py = r[1] + (1 - ny) / 2 * (r[3] - r[1]);
-            // ...as NDC over the whole eye, and back to the draw's own coordinates.
-            const float tx = px / W * 2 - 1 - c[0], ty = 1 - py / H * 2 - c[1];
-            float* v = reinterpret_cast<float*>(out + size_t(i) * stride);
-            v[0] = (m[3] * tx - m[1] * ty) / det;
-            v[1] = (-m[2] * tx + m[0] * ty) / det;
-            if (!outline) v[4] = px / W, v[5] = py / H;  // the eye's own pixel
         }
         D3D11_MAPPED_SUBRESOURCE ms;
         if (FAILED(g_ctx->Map(g_junc_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) continue;
-        memcpy(ms.pData, out, size_t(nout) * stride);
+        memcpy(ms.pData, out.data(), out.size());
         g_ctx->Unmap(g_junc_vb, 0);
         const UINT zero = 0;
         g_ctx->IASetVertexBuffers(0, 1, &g_junc_vb, &stride, &zero);
-        g_ctx->IASetPrimitiveTopology(outline ? topo : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        const D3D11_VIEWPORT full{0, 0, W, H, scale.vp[0].MinDepth, scale.vp[0].MaxDepth};
+        g_ctx->IASetPrimitiveTopology(lines ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D11_VIEWPORT full{0, 0, W, H, gvp.MinDepth, gvp.MaxDepth};
         const D3D11_RECT all{0, 0, LONG(scale.rw), LONG(scale.rh)};
         g_ctx->RSSetViewports(1, &full);
         g_ctx->RSSetScissorRects(1, &all);
         ID3D11ShaderResourceView* use[kMaxTextures];
         for (UINT i = 0; i < kMaxTextures; ++i) {
             use[i] = srv[i];
-            if (eye && srv[i])
-                if (auto t = twin_view(srv[i], false)) use[i] = t;  // the right eye's copy
+            if (eye_src[i]) {
+                ID3D11Resource* src_eye = eye_src[i];
+                if (eye)
+                    if (ID3D11Texture2D* t = twin_tex(src_eye, false)) src_eye = t;  // the right eye's copy
+                int r[4];
+                if (window) {
+                    if (eye)
+                        if (auto t = twin_view(srv[i], false)) use[i] = t;
+                } else if (vr::frustum_rect_unclamped(g_eyes[eye].head, g_eyes[eye].px, g_eyes[eye].py, g_gv_tan[0],
+                                                      g_gv_tan[1], int(scale.rw), int(scale.rh), r)) {
+                    // Anything else that reads the copy over the whole frame (the preview inset):
+                    // this eye's picture where the game camera's view lies in it.
+                    if (auto crop = eye_crop(eye, src_eye, r)) use[i] = crop;
+                } else if (eye) {
+                    if (auto t = twin_view(srv[i], false)) use[i] = t;
+                }
+            } else if (eye && srv[i]) {
+                if (auto t = twin_view(srv[i], false)) use[i] = t;
+            }
         }
         g_ctx->PSSetShaderResources(0, kMaxTextures, use);
         g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
         g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[eye]);
-        g_ctx->Draw(nout, 0);
+        g_ctx->Draw(UINT(out.size() / stride), 0);
         drew = true;
     }
-    (void)slots;
     g_ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
     g_ctx->IASetPrimitiveTopology(topo);
     g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
@@ -2527,8 +2647,9 @@ static void draw_stereo(DrawFn draw) {
         release_targets();
         return;
     }
-    // The junction screen: from its tint on, the 2D draws that aren't full-screen filters go to
-    // the game view's rectangle in each eye (draw_junction), not to the HUD panel.
+    // The junction screen: from its tint on, the 2D draws that aren't full-screen filters go into
+    // the eyes as a flat sign in front of the game camera (draw_junction_projected), not to the
+    // HUD panel.
     if (scene && kind == 2 && g_frame_3d) {
         if (!g_junction_now && ps_in(g_junction_ps)) {
             g_junction_now = true;  // (the tint itself: a full-screen filter, drawn below)
@@ -2536,15 +2657,12 @@ static void draw_stereo(DrawFn draw) {
             const bool full_vp =
                 scale.nvp && scale.vp[0].Width >= 0.95f * g_orig_w && scale.vp[0].Height >= 0.95f * g_orig_h;
             if (!(full_vp && quad_cover() >= kFadeCover)) {  // (full-screen filters: below; the inset fills its own viewport)
-                // Windows and their outlines reach the edge of the view (draw_junction_extended);
-                // the letterbox bars stay out of the eyes.
+                // The letterbox bars stay out of the eyes.
                 bool done = false;
                 if (full_vp && !pixel_shader_textured() && is_letterbox_bars())
                     done = true;
-                else if (full_vp && g_draw_first < 0 && g_draw_count == 6 && eye_image)
-                    done = draw_junction_extended(false, scale, rtv, dsv);
-                else if (full_vp && g_draw_first >= 0 && g_draw_count == 8 && !pixel_shader_textured())
-                    done = draw_junction_extended(true, scale, rtv, dsv);
+                else
+                    done = draw_junction_projected(eye_image, scale, rtv, dsv);
                 if (done || draw_junction(draw, rtv, dsv, scale)) {
                     draw_game_view(draw, rtv, dsv, scale);
                     release_targets();

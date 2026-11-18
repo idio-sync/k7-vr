@@ -133,6 +133,16 @@ static bool frustum_ndc_bounds(const float head[12], const float px[4], const fl
     return bounded;
 }
 
+void game_ndc_to_eye_clip(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y,
+                          float u, float v, float out[3]) {
+    const float g[3] = {u * tan_x, v * tan_y, -1};
+    float e[3];
+    for (int i = 0; i < 3; ++i) e[i] = head[i * 4] * g[0] + head[i * 4 + 1] * g[1] + head[i * 4 + 2] * g[2];
+    out[0] = px[0] * e[0] + px[1] * e[1] + px[2] * e[2];
+    out[1] = py[0] * e[0] + py[1] * e[1] + py[2] * e[2];
+    out[2] = -e[2];
+}
+
 bool frustum_rect_unclamped(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y,
                             int width, int height, int out[4]) {
     float min_x, max_x, min_y, max_y;

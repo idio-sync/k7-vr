@@ -58,6 +58,13 @@ void frustum_scissor(const float head[12], const float px[4], const float py[4],
 bool frustum_rect_unclamped(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y,
                             int width, int height, int out[4]);
 
+// A point of the game camera's picture (u, v: its NDC, -1..1 over the frame, y up) as the
+// direction it shows, in an eye's clip space: out = clip x, clip y, w (w <= 0: at or behind the
+// eye plane). The picture as a flat sign at infinity in front of the game camera: straight
+// lines stay straight, and it foreshortens as the head turns away (a homography).
+void game_ndc_to_eye_clip(const float head[12], const float px[4], const float py[4], float tan_x, float tan_y,
+                          float u, float v, float out[3]);
+
 // Share of the screen (0..1) a 2D draw's extent covers: the bounding box of its `count`
 // vertices' x,y (as pairs), placed by the draw's model-view rows (3x4) and orthographic
 // projection (4x4, row-major), clipped to NDC.
