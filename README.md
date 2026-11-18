@@ -11,8 +11,6 @@ rough edges (see [Known issues](#known-issues)).
 
 ## Screenshots
 
-![A junction in the headset: the paths' windows and labels drawn over the 3D room, left and right eye side by side](media/junction.png)
-
 ![The hotel lobby: the game's own fixed view, then the same moment in the headset looking left, ahead, right and up](media/look-around.png)
 
 ![Garcian's arm and pistol following the controller in three different directions](media/garcian-aim.png)
