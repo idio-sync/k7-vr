@@ -13,9 +13,7 @@ rough edges (see [Known issues](#known-issues)).
 
 ![A junction in the headset: the paths' windows and labels drawn over the 3D room, left and right eye side by side](media/junction.png)
 
-![Walking through the hotel lobby in 3D, one eye](media/lobby.png)
-
-![Harman's TV on the virtual screen: the persona select screen](media/harman-tv.png)
+![The hotel lobby: the game's own fixed view, then the same moment in the headset looking left, ahead, right and up](media/look-around.png)
 
 ![Garcian's arm and pistol following the controller in three different directions](media/garcian-aim.png)
 
