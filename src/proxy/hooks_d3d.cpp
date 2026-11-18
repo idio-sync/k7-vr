@@ -46,6 +46,7 @@ static std::unordered_map<ID3D11Resource*, void*> g_cb_mapped;
 // buffer (WRITE_NO_OVERWRITE), so its 2D quads' vertices can be read there at draw time
 // (overlay_cover) instead of being read back from the GPU.
 static std::unordered_map<ID3D11Resource*, const uint8_t*> g_vb_mapped;
+static INT g_draw_base;  // the current indexed draw's base vertex (its quads: vertices base..base+3)
 
 static UINT constant_buffer_size(ID3D11Resource* res) {
     D3D11_RESOURCE_DIMENSION dim;
@@ -252,9 +253,12 @@ static void capture_draw(ID3D11DeviceContext* c, const char* kind, UINT count, U
     // Tiny non-indexed draws (points, lines, sprites): their vertices, as floats.
     std::vector<float> f;
     UINT stride = 0;
-    if (first_vertex >= 0 && count <= 6 && read_vertices(c, UINT(first_vertex), count, f, &stride)) {
+    // (Indexed 6-index quads: their four vertices from the base vertex.)
+    const UINT shown = first_vertex >= 0 ? count : 4;
+    if (count <= 6 && (first_vertex >= 0 || (count == 6 && g_draw_base >= 0)) &&
+        read_vertices(c, UINT(first_vertex >= 0 ? first_vertex : g_draw_base), shown, f, &stride)) {
         appendf(s, " verts(stride %u)=", stride);
-        for (UINT v = 0; v < count; ++v) {
+        for (UINT v = 0; v < shown; ++v) {
             s += v ? "|" : "";
             for (UINT i = 0; i < stride / 4 && i < 8; ++i) appendf(s, i ? " %.6g" : "%.6g", f[v * (stride / 4) + i]);
         }
@@ -303,7 +307,19 @@ constexpr UINT kMaxTargets = 4;
 constexpr UINT kMaxTextures = 8;
 static ID3D11Buffer* g_eye_cb[2];  // left, right
 static ID3D11Buffer* g_gv_cb;      // game-view pass (vr::game_view)
+static ID3D11Buffer* g_own_cb;     // ...for cameras the game didn't inflate: their own projection
 static float g_gv_tan[2];          // its frustum's half-angle tangents this frame (x, y; 0: not replaced)
+// Flat frames: frames that draw a 3D picture only to copy it into a texture, then clear the
+// scene target and draw a 2D screen with that copy. Harman's TV does this: the persona's portrait
+// and the channel's text are drawn full-frame, copied, and the copy is drawn onto the TV's curved
+// glass inside the TV set's artwork. Split for the headset, the portrait would be drawn with the
+// eyes' frustum and the text taken to the HUD panel, and the glass would show neither. A frame
+// that shows the pattern makes the next one flat: drawn with the game's camera into both eyes,
+// its text kept in place, and handed off as a 2D frame (the screen panel).
+static bool g_flat_frame;    // this frame is drawn flat
+static bool g_frame_persp;   // a perspective draw went into the scene target this frame (flat or not)
+static bool g_scene_copied;  // ...and after it a draw copied the scene target into another frame-sized texture
+static bool g_capture_seen;  // ...and after that the scene target was cleared
 static ID3D11Buffer* g_draw_cb[2];  // slot b13 per-draw transform: [0] none, [1] first-person arm and gun
 constexpr UINT kDrawSlot = 13;
 static bool g_aim_mode;             // the game's first-person aim camera is active this frame
@@ -1228,6 +1244,10 @@ static void set_eye_offsets() {
         // the camera's FOV can change later in the frame).
         g_gv_tan[0] = gv.flags[0] && gv.px[0] ? 1 / gv.px[0] : 0;
         g_gv_tan[1] = gv.flags[0] && gv.py[1] ? 1 / gv.py[1] : 0;
+        if (g_own_cb) {  // the same view with the draw's own projection
+            gv.flags[0] = 0;
+            g_ctx->UpdateSubresource(g_own_cb, 0, nullptr, &gv, 0, 0);
+        }
     }
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
 }
@@ -1428,16 +1448,63 @@ static bool pixel_shader_textured() {
     return slots != 0;
 }
 
-static bool is_card_shader() {
-    if (g_card_ps.empty()) return false;
+// Whether this perspective draw's projection is the inflated one (fov_inflate), so the game view
+// should project it with the FOV the game meant. Cameras that don't go through the inflation stub
+// (the TV's portrait camera, about 33 degrees) keep their own projection. True when unknown.
+static bool draw_proj_inflated() {
+    const float inflated = fov_inflate_current();
+    if (inflated <= 0) return true;
+    ID3D11Buffer* cb = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &cb);
+    if (!cb) return true;
+    auto it = g_cb.find(cb);
+    cb->Release();
+    if (it == g_cb.end() || it->second.size() < kTemplateCbMin) return true;
+    const float* p = reinterpret_cast<const float*>(it->second.data() + kProjOffset);
+    if (!(p[12] == 0 && p[13] == 0 && p[14] == -1 && p[15] == 0) || p[5] == 0) return true;
+    const float t = 1 / p[5], ti = tanf(inflated * 3.14159265f / 360);
+    return fabsf(t / ti - 1) < 0.02f;
+}
+
+// Whether the bound pixel shader reads `tex` (only the slots it declares).
+static bool samples_texture(ID3D11Resource* tex) {
+    if (!tex) return false;
+    uint32_t slots = 0xFFFFFFFF;
+    ID3D11PixelShader* ps = nullptr;
+    g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (ps) {
+        UINT size = sizeof(slots);
+        if (FAILED(ps->GetPrivateData(kTextureSlotsGuid, &size, &slots))) slots = 0xFFFFFFFF;
+        ps->Release();
+    }
+    ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+    bool found = false;
+    for (UINT i = 0; i < kMaxTextures; ++i) {
+        if (!srv[i]) continue;
+        if (!found && (slots & (1u << i))) {
+            ID3D11Resource* res = nullptr;
+            srv[i]->GetResource(&res);
+            found = res == tex;
+            res->Release();
+        }
+        srv[i]->Release();
+    }
+    return found;
+}
+
+static bool ps_in(const std::vector<uint64_t>& list) {
+    if (list.empty()) return false;
     ID3D11PixelShader* ps = nullptr;
     g_ctx->PSGetShader(&ps, nullptr, nullptr);
     const uint64_t h = shader_hash(ps);
     if (ps) ps->Release();
-    for (uint64_t c : g_card_ps)
+    for (uint64_t c : list)
         if (c == h) return true;
     return false;
 }
+
+static bool is_card_shader() { return ps_in(g_card_ps); }
 
 // HUD draws render over a transparent overlay, but the game's blending doesn't write alpha.
 // Same colour blending, and alpha = max(source alpha, existing) so the overlay gets coverage
@@ -1824,7 +1891,8 @@ static void draw_game_view(DrawFn draw, ID3D11RenderTargetView* const* rtv, ID3D
     if (dsv && !gdsv) return;
     scale.unscale();  // original-size targets: the game's own viewports
     g_ctx->OMSetRenderTargets(kMaxTargets, grtv, gdsv);
-    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_gv_cb);
+    ID3D11Buffer* cb = g_own_cb && draw_kind() == 1 && !draw_proj_inflated() ? g_own_cb : g_gv_cb;
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &cb);
     draw();
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
     g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
@@ -1954,6 +2022,55 @@ static void draw_stereo(DrawFn draw) {
         D3D11_TEXTURE2D_DESC rd, dd;
         scene = texture_of(rtv[0], &rd) && texture_of(dsv, &dd) && rd.Width == dd.Width && rd.Height == dd.Height;
     }
+    // Flat frames (g_flat_frame): watch for the pattern in every frame.
+    if (scene && kind == 1) g_frame_persp = true;
+    if (!scene && g_frame_persp && g_scene_tex && rt0 != g_scene_tex && resized_info(rt0) &&
+        samples_texture(g_scene_tex))
+        g_scene_copied = true;
+    if (scene && kind == 1 && g_flat_frame) {
+        D3D11_TEXTURE2D_DESC sd;
+        g_scene_tex = texture_of(rtv[0], &sd);
+    }
+    // The right eye: the same draw into the twins of the targets, with the twins of any
+    // eye-rendered textures it samples, and the right eye's constants (`cb`).
+    auto draw_right = [&](ID3D11Buffer* cb, auto&& fn) {
+        ID3D11RenderTargetView* trtv[kMaxTargets] = {};
+        for (UINT i = 0; i < kMaxTargets; ++i)
+            if (rtv[i] && !(trtv[i] = twin_view(rtv[i], true))) return;
+        ID3D11DepthStencilView* tdsv = dsv ? twin_view(dsv, true) : nullptr;
+        if (dsv && !tdsv) return;
+        ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+        ID3D11ShaderResourceView* tsrv[kMaxTextures] = {};
+        g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+        bool swapped = false;
+        for (UINT i = 0; i < kMaxTextures; ++i) {
+            tsrv[i] = srv[i];
+            if (srv[i])
+                if (auto t = twin_view(srv[i], false)) tsrv[i] = t, swapped = true;
+        }
+        g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
+        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, tsrv);
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &cb);
+        fn();
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
+        g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+        for (auto s : srv)
+            if (s) s->Release();
+    };
+    if (g_flat_frame) {
+        // Both eyes get the game's picture: 3D draws from the game camera (with the FOV it meant,
+        // or the draw's own projection for cameras it didn't inflate), 2D draws as issued, text
+        // included. Not a 3D frame: no HUD, and the hand-off puts it on the screen panel.
+        ID3D11Buffer* cb = kind == 1 ? (draw_proj_inflated() ? g_gv_cb : g_own_cb) : g_eye_cb[0];
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &cb);
+        draw();
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+        draw_right(kind == 1 ? cb : g_eye_cb[1], draw);
+        if (scene) draw_game_view(draw, rtv, dsv, scale);
+        release_targets();
+        return;
+    }
     if (scene && kind == 1) {
         g_frame_3d = true;
         D3D11_TEXTURE2D_DESC sd;
@@ -2081,32 +2198,7 @@ static void draw_stereo(DrawFn draw) {
     eye_draw(0);
 
     // Right eye: twins for targets, depth and any sampled texture an eye rendered.
-    ID3D11RenderTargetView* trtv[kMaxTargets] = {};
-    bool ok = true;
-    for (UINT i = 0; i < kMaxTargets; ++i)
-        if (rtv[i] && !(trtv[i] = twin_view(rtv[i], true))) ok = false;
-    ID3D11DepthStencilView* tdsv = dsv ? twin_view(dsv, true) : nullptr;
-    if (dsv && !tdsv) ok = false;
-    if (ok) {
-        ID3D11ShaderResourceView* srv[kMaxTextures] = {};
-        ID3D11ShaderResourceView* tsrv[kMaxTextures] = {};
-        g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
-        bool swapped = false;
-        for (UINT i = 0; i < kMaxTextures; ++i) {
-            tsrv[i] = srv[i];
-            if (srv[i])
-                if (auto t = twin_view(srv[i], false)) tsrv[i] = t, swapped = true;
-        }
-        g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
-        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, tsrv);
-        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[1]);
-        eye_draw(1);
-        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
-        if (swapped) g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
-        g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
-        for (auto s : srv)
-            if (s) s->Release();
-    }
+    draw_right(g_eye_cb[1], [&] { eye_draw(1); });
     if (gun && g_draw_cb[0]) g_ctx->VSSetConstantBuffers(kDrawSlot, 1, &g_draw_cb[0]);
     if (scene) draw_game_view(draw, rtv, dsv, scale);
     release_targets();
@@ -2138,17 +2230,21 @@ static void mirror_copy(ID3D11Resource* dst, UINT dsub, UINT x, UINT y, UINT z, 
         g_ctx->CopySubresourceRegion(tdst, dsub, x, y, z, from, ssub, box);
 }
 
-static void load_card_list() {
+static void load_shader_list(const wchar_t* key, const wchar_t* fallback, std::vector<uint64_t>& out) {
     wchar_t buf[512];
-    GetPrivateProfileStringW(L"vr", L"cards", L"d358d9e91e34870e", buf, 512, path_in(L"k7vr.ini").c_str());
+    GetPrivateProfileStringW(L"vr", key, fallback, buf, 512, path_in(L"k7vr.ini").c_str());
     for (wchar_t* p = buf; *p;) {
         wchar_t* end = nullptr;
         const uint64_t h = _wcstoui64(p, &end, 16);
         if (end == p) break;
-        g_card_ps.push_back(h);
+        out.push_back(h);
         p = end;
         while (*p == L',' || *p == L' ') ++p;
     }
+}
+
+static void load_card_list() {
+    load_shader_list(L"cards", L"d358d9e91e34870e", g_card_ps);
     wchar_t mode[16];
     GetPrivateProfileStringW(L"vr", L"card_mode", L"scissor", mode, 16, path_in(L"k7vr.ini").c_str());
     g_card_skip = _wcsicmp(mode, L"skip") == 0;
@@ -2251,6 +2347,7 @@ static void after_draw() {
 // ---- Context hooks (installed in the stand-in's table; `c` is the stand-in) ----
 
 static void STDMETHODCALLTYPE w_DrawIndexed(ID3D11DeviceContext* c, UINT count, UINT start, INT base) {
+    g_draw_base = base;
     before_draw("DrawIndexed", count, 1);
     draw_stereo([&] { real_of(c)->DrawIndexed(count, start, base); });
     after_draw();
@@ -2352,6 +2449,12 @@ static void STDMETHODCALLTYPE w_ClearRTV(ID3D11DeviceContext* c, ID3D11RenderTar
     }
     real_of(c)->ClearRenderTargetView(rtv, color);
     mirror_clear_rtv(rtv, color);
+    if (g_scene_copied && rtv && g_scene_tex) {  // the scene drawn, copied, and now cleared (g_flat_frame)
+        ID3D11Resource* res = nullptr;
+        rtv->GetResource(&res);
+        if (res == g_scene_tex) g_capture_seen = true;
+        if (res) res->Release();
+    }
 }
 
 static void STDMETHODCALLTYPE w_ClearDSV(ID3D11DeviceContext* c, ID3D11DepthStencilView* dsv, UINT flags, FLOAT d,
@@ -2968,6 +3071,10 @@ static void end_frame(IDXGISwapChain* sc) {
                 logf("sweep %03u yaw %g pitch %g: draws %u", n, g_sweep_yaw, g_sweep_pitch, g_draws_last);
             }
         }
+        if (g_capture_seen != g_flat_frame)
+            logf("stereo: flat frames %s", g_capture_seen ? "on (a 3D picture copied, then the scene cleared)" : "off");
+        g_flat_frame = g_capture_seen;
+        g_frame_persp = g_scene_copied = g_capture_seen = false;
         g_prev_frame_3d = g_frame_3d;
         g_frame_3d = false;
         g_scene_vp_set = false;
@@ -3123,6 +3230,7 @@ static void hook_device(ID3D11Device* dev) {
     dev->CreateBuffer(&eye, &init, &g_eye_cb[0]);
     dev->CreateBuffer(&eye, &init, &g_eye_cb[1]);
     dev->CreateBuffer(&eye, &init, &g_gv_cb);
+    dev->CreateBuffer(&eye, &init, &g_own_cb);
     g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
     vr::init(dev, g_ctx);
     load_card_list();

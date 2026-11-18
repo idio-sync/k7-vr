@@ -77,4 +77,8 @@ void set_fov_inflate(float degrees) {
 // The FOV the game meant to use this frame (degrees), or 0 when not inflating.
 float fov_inflate_intended() { return (g_patched && g_inflated > 0) ? g_intended : 0; }
 
+// The FOV the render camera was given instead (degrees), or 0 when not inflating. Cameras the
+// stub doesn't pass through (the TV's portrait camera in Harman's Room) keep their own.
+float fov_inflate_current() { return g_patched ? g_inflated : 0; }
+
 }  // namespace k7

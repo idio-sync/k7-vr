@@ -6,23 +6,27 @@
 #   tools\check.ps1 -NoInstall   checks what is installed
 #   tools\check.ps1 -Flat        the same tour with VR off: the reference picture of each screen
 #                                (no checks), for tools\catalog.py to compare against
+#   tools\check.ps1 -Script tour_save   another script in tools\scripts (tour_save: from the saved
+#                                game in Harman's Room); its runs are kept in k7vr	our\<script>r|flat
 # k7vr.ini is put back as it was afterwards. The run's log and images are kept in
 # k7vr\tour\vr\ (or k7vr\tour\flat\); tools\catalog.py builds the screen catalogue from them.
 param(
     [string]$Game = 'C:\Users\Virtual\killer7-vr-game',
     [switch]$NoInstall,
     [switch]$Flat,
+    [string]$Script = 'tour',
     [int]$TimeoutMinutes = 20
 )
 $ErrorActionPreference = 'Stop'
 $k7 = Join-Path $Game 'k7vr'
 $ini = Join-Path $k7 'k7vr.ini'
 $log = Join-Path $k7 'k7vr.log'
-$keep = Join-Path $k7 ('tour\' + $(if ($Flat) { 'flat' } else { 'vr' }))
+$sub = if ($Script -eq 'tour') { 'tour\' } else { "tour\$Script\" }
+$keep = Join-Path $k7 ($sub + $(if ($Flat) { 'flat' } else { 'vr' }))
 
 if (Get-Process Killer7Win -ErrorAction SilentlyContinue) { throw 'Killer7Win is already running: stop it first (tools\run.ps1 -Stop)' }
 
-$lines = @(Get-Content (Join-Path $PSScriptRoot 'scripts\tour.txt'))
+$lines = @(Get-Content (Join-Path $PSScriptRoot "scripts\$Script.txt"))
 $expected = if ($Flat) { 0 } else { @($lines | Where-Object { $_ -match '^\s*expect\s' }).Count }
 $screens = @($lines | Where-Object { $_ -match '^\s*screen\s' }).Count
 

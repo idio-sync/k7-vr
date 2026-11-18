@@ -1,0 +1,153 @@
+# The save tour (tools\check.ps1 -Script tour_save): from the saved game in Harman's Room
+# (Slot A, file 1, "[Angel]"; a copy is in <test copy>\k7vr\save_backups\harman_room_2026-11-17,
+# to put back in k7vr\SavedGames\killer7 if it is lost) through the TV's channels, the room's
+# junctions, the lobby and the Elevator Hall. Same conventions as tour.txt: keyboard until the
+# first pad press, `expect` before most `screen`s, `sweep` on 3D screens.
+
+# --- Boot to the title menu (keyboard; the timings of tour.txt) ---
+wait 8000
+expect 2d 1000
+wait 1200
+key SPACE
+wait 3000
+key SPACE
+wait 6000
+wait 8000
+key SPACE
+wait 2500
+expect 2d 1000
+wait 1200
+key SPACE
+wait 2500
+expect 2d 1000
+wait 1200
+# To the top (NEW GAME), then one down: CONTINUE.
+key W
+wait 300
+key W
+wait 300
+key W
+wait 300
+key W
+wait 300
+key S
+wait 600
+screen title menu, continue
+key SPACE
+wait 3000
+expect 2d 1000
+wait 1200
+screen load, slots
+key SPACE
+wait 3000
+screen load, files
+key SPACE
+wait 3000
+# "Load this file?" starts on NO.
+key A
+wait 500
+screen load, confirm
+key SPACE
+wait 12000
+# Loading opens on the silhouette aiming check (J fires), then the moon.
+screen silhouette check
+key J
+wait 6000
+press A
+wait 13000
+
+# --- Harman's Room (pad from here) ---
+expect 3d 1000
+wait 1200
+screen Harman's Room
+sweep
+# The TV: up-left at the room's junction.
+padhold - -0.6 1
+wait 1000
+padhold A -0.6 1
+wait 300
+padhold - -0.6 1
+wait 300
+padhold - 0 0
+wait 3500
+expect 2d 1000
+wait 1200
+screen TV, Blood Room
+press RIGHT
+wait 2500
+screen TV, static
+press RIGHT
+wait 3000
+expect 2d 1000
+wait 1200
+screen TV, persona
+press A
+wait 2000
+screen TV, select
+press A
+wait 1500
+expect 2d 1000
+wait 1200
+screen TV, change prompt
+# No, back, off the TV.
+press B
+wait 1500
+press B
+wait 1500
+press B
+wait 4000
+expect 3d 1000
+wait 1200
+screen Harman's Room, junction
+sweep
+# "Room" (right): the back of the room, Iwazaru.
+padhold - 1 0
+wait 1000
+padhold A 1 0
+wait 300
+padhold - 1 0
+wait 300
+padhold - 0 0
+wait 4000
+expect 3d 1000
+wait 1200
+screen Harman's Room, back
+sweep
+# Turn round; "Hallway" (left) leads out to the lobby.
+press B
+wait 1500
+hold A 6000
+wait 1500
+padhold - -1 0
+wait 1000
+padhold A -1 0
+wait 300
+padhold - -1 0
+wait 300
+padhold - 0 0
+wait 6000
+expect 3d 1000
+wait 1200
+screen lobby, from Harman's Room
+sweep
+hold A 3000
+wait 800
+expect 3d 1000
+wait 1200
+screen lobby junction
+sweep
+# "Elevator Hall" (up-left).
+padhold - -0.7 0.7
+wait 1000
+padhold A -0.7 0.7
+wait 300
+padhold - -0.7 0.7
+wait 300
+padhold - 0 0
+wait 6000
+expect 3d 1000
+wait 1200
+screen Elevator Hall
+sweep
+wait 500
+mark tour done
