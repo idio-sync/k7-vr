@@ -13,6 +13,7 @@ endif()
 add_library(k7vr SHARED
     src/proxy/dllmain.cpp
     src/proxy/log.cpp
+    src/proxy/crash.cpp
     src/proxy/iat.cpp
     src/proxy/vtbl_index.cpp
     src/proxy/ctx_wrap.cpp

@@ -14,6 +14,8 @@ Play
 Settings and log
   k7vr\k7vr.ini (created on the first start, every setting commented out) and k7vr\k7vr.log.
   Controls, settings and known issues: see the README on GitHub.
+  Reporting a problem: send k7vr\k7vr.log from right after it happened (the next start replaces
+  it). If the game crashed, the log says where.
 
 Uninstall
   Delete XINPUT1_3.dll, openvr_api.dll and the k7vr folder from the game folder.

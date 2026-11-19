@@ -17,6 +17,11 @@ void init_paths();
 std::wstring path_in(const wchar_t* name);  // g_dir + L"\\" + name
 
 void log_open();
+
+// Crash reports in k7vr.log (crash.cpp).
+void install_crash_log();
+void log_exit(bool process_exit);
+void crash_test();  // the `crashtest` command: crashes the game on purpose
 void logf(const char* fmt, ...);
 
 // Import and vtable patching.

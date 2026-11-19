@@ -38,6 +38,7 @@
 //   activate                tell the game its window is active (it ignores input otherwise)
 //   mouse x y               where the game sees the cursor, in window client pixels (default: off-window)
 //   log text                marker in k7vr.log
+//   crashtest               crash the game on purpose (checks the crash report in k7vr.log)
 // Steps (all but log/activate) run in order, each for its duration; shot/capture take no time. Pad input is ORed into player 1's pad; keys
 // are posted to the game window as WM_INPUT (see hooks_input.cpp), so it needn't have focus.
 #include "common.h"
@@ -403,6 +404,8 @@ static void run_line(const std::string& line) {
         int x = 0, y = 0;
         ss >> x >> y;
         set_fake_cursor(x, y);
+    } else if (cmd == "crashtest") {  // crashes the game on purpose (the crash report in k7vr.log)
+        crash_test();
     } else if (cmd == "log") {
         std::string rest;
         std::getline(ss, rest);

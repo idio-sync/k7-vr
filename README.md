@@ -35,6 +35,8 @@ rough edges (see [Known issues](#known-issues)).
 - **Play flat:** hold Shift while the game starts, or set `mode=off` in `k7vr\k7vr.ini`.
 - **Settings and log:** `k7vr\k7vr.ini` (created on the first start, every setting commented
   out) and `k7vr\k7vr.log`.
+- **Reporting a problem:** send `k7vr\k7vr.log` from right after it happened (the next start
+  replaces it). If the game crashed, the log says where.
 - **Key bindings:** in VR the game reads its settings from `k7vr\killer7.ini`, a copy of your
   `killer7.ini` (refreshed whenever yours changes) with the bindings the mod needs. Your own
   file and your saves are untouched.

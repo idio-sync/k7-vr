@@ -1,10 +1,11 @@
 #include "common.h"
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
         k7::init_paths();
         k7::log_open();
+        k7::install_crash_log();
         k7::logf("k7vr probe loaded into %ls, exe base %p", k7::g_game_dir.c_str(), GetModuleHandleW(nullptr));
         // The exe's imports are bound before DLL initializers run, so its IAT can be patched here.
         k7::install_folder_hook();
@@ -15,6 +16,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         k7::install_file_hooks();
         k7::install_vr_profile();
         k7::start_audio_mute();
+    } else if (reason == DLL_PROCESS_DETACH) {
+        k7::log_exit(reserved != nullptr);
     }
     return TRUE;
 }
