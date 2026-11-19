@@ -1720,7 +1720,9 @@ static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11
         D3D11_TEXTURE2D_DESC nd = *desc;
         nd.Width = w;
         nd.Height = h;
-        HRESULT hr = o_CreateTexture2D(d, &nd, init, out);
+        // K7VR_REFUSE_EYE_TARGETS=1 (tests): act as a driver that refuses the eye size.
+        static const bool refuse = GetEnvironmentVariableW(L"K7VR_REFUSE_EYE_TARGETS", nullptr, 0) > 0;
+        HRESULT hr = refuse ? E_OUTOFMEMORY : o_CreateTexture2D(d, &nd, init, out);
         if (SUCCEEDED(hr) && out && *out) {
             AcquireSRWLockExclusive(&g_resized_lock);
             g_resized[*out] = {float(w) / float(desc->Width), float(h) / float(desc->Height), desc->Width, desc->Height, w, h};
@@ -1739,8 +1741,14 @@ static HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* d, const D3D11
                 g_exe_lo = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
                 g_exe_hi = g_exe_lo + mi.SizeOfImage;
             }
+            return hr;
         }
-        return hr;
+        // The driver refused the eye size (a driver may refuse what another accepts): the game
+        // gets its target at the size it asked for rather than a failure it doesn't expect.
+        static int refused;
+        if (refused++ < 10)
+            logf("eye targets: %ux%u f%d samples %u bind 0x%x REFUSED at %ux%u (0x%08x); made at the game's size",
+                 desc->Width, desc->Height, desc->Format, desc->SampleDesc.Count, desc->BindFlags, w, h, unsigned(hr));
     }
     // A texture the game creates "like" a resized one (it sees the original size) is made at
     // that size: its readback staging textures, copy destinations.
