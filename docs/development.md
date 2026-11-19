@@ -8,8 +8,8 @@ the [README](../README.md); for where the work stands and what's next, see [stat
 
 - `src\proxy\`: the stand-in `XINPUT1_3.dll`: Direct3D 11 and shader-compile hooks
   (`hooks_d3d.cpp`, `hooks_compile.cpp`), input (`hooks_input.cpp`, `xinput.cpp`), the game
-  fixes for VR (`aim.cpp`, `fov_inflate.cpp`), the VR copy of `killer7.ini` (`vr_profile.cpp`,
-  `ini_bindings.cpp`), and the command file the harness talks to (`control.cpp`).
+  fixes for VR (`aim.cpp`, `fov_inflate.cpp`), the opt-in VR copy of `killer7.ini` with keyboard
+  bindings (`vr_profile.cpp`, `ini_bindings.cpp`; off unless `vr_profile=1`), and the command file the harness talks to (`control.cpp`).
 - `src\vr\`: the headset side: OpenVR or the simulated headset, the eyes, the HUD and screen
   panels (`vr.cpp`), the controllers as a gamepad (`input.cpp`), head and aim math
   (`headmath.cpp`). `vr.h` documents the main `[vr]` settings.
@@ -188,7 +188,7 @@ Under `[probe]` (mostly for the test copy; `tools\profile.ps1` sets them):
 | `leave_desktop_alone` | 0 | stop the game clipping and moving the real cursor |
 | `log_files` | 0 | log the files the game opens |
 | `stereo_patch` | 1 | patch the game's vertex shaders for stereo as they compile |
-| `vr_profile` / `vr_profile_source` | 0 / none | force the VR copy of `killer7.ini` on in the test copy, and read it from another file (testing) |
+| `vr_profile` / `vr_profile_source` | 0 / none | turn on the VR copy of `killer7.ini` (`k7vr\killer7.ini`, keyboard bindings for the controllers' keys; off by default, since the controllers drive the game's gamepad), and seed it from another file (testing) |
 
 ## Playtest checklist (next headset session)
 

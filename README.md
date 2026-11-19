@@ -37,9 +37,8 @@ rough edges (see [Known issues](#known-issues)).
   out) and `k7vr\k7vr.log`.
 - **Reporting a problem:** send `k7vr\k7vr.log` from right after it happened (the next start
   replaces it). If the game crashed, the log says where.
-- **Key bindings:** in VR the game reads its settings from `k7vr\killer7.ini`, a copy of your
-  `killer7.ini` (refreshed whenever yours changes) with the bindings the mod needs. Your own
-  file and your saves are untouched.
+- **Your settings and saves:** the game keeps using your own `killer7.ini` and save files. The
+  controllers act as the game's gamepad, so its gamepad bindings apply (see Controls).
 - **Other mods:** another mod that also uses `XINPUT1_3.dll` can't be installed alongside.
 - **Uninstall:** delete `XINPUT1_3.dll`, `openvr_api.dll` and the `k7vr` folder from the game
   folder.
