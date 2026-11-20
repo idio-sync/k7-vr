@@ -90,6 +90,12 @@ The full list is in [docs/development.md](docs/development.md#settings).
 - HUD parts that point into the scene (the compass, prompts) don't always line up with it, and
   the map's labels are small on the virtual screen.
 - Letterboxed cutscenes show a thin line across the view.
+- Harman's TV: in a headset the TV can float as a flat picture with the channel's 3D scene (the
+  surgeon) visible around it, instead of the whole TV on the virtual screen. Not reproduced
+  without a headset yet.
+- The static between scenes surrounds you, but the area card that can follow it (the persona's
+  portrait and the area's name) is still flat, and the first moments of the static show the
+  last picture fixed to your view.
 
 ## Development
 
