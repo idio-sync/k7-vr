@@ -400,6 +400,21 @@ static bool g_pivot_seen;                             // found in this frame's a
 static int g_pivot_still;                             // frames the grip has held still
 static bool g_pivot_locked;                           // the grip is fixed for this aim session
 static float g_gun_clip = 2.0f;                       // the arm (sleeve) is cut off this far behind the grip (units)
+// The cut follows the grip as the game's recoil moves it: a shot kicks the gun back and up, and a
+// cut fixed behind where the grip rested sliced the hand open (seen through its back). The cut
+// sits behind the nearer of the rest grip and the last frame's, and moves back during a frame
+// if that frame's grip draw comes nearer still (the arm pieces may be drawn before the grip).
+// The recoil itself is damped in the hand: Dan's revolver kicks the grip 2.3 units back and 3.2
+// up, which in the hand put the gun and forearm in the player's face. [vr] gun_recoil (or `gun
+// recoil`): the share of the kick's movement kept (its rotation is kept whole).
+static float g_gun_recoil = 0.25f;
+static bool g_grip_seen;                              // this frame's grip draw has been seen
+static float g_grip_now[3], g_grip_last[3];           // its position (game aim view), and last frame's
+static bool g_grip_last_valid;
+static float g_clip_base;                             // the z the cut is behind this frame
+static float g_draw_m[16];                            // the arm/gun transform as last uploaded (slot b13)
+static float g_draw_qt[3];                            // ...the hand's position in it (before the grip offset)
+static void set_draw_grip(const float grip[3]);
 static float g_aim_converge = 10;                     // metres, when the ray's hit isn't known
 static bool g_aim_depth = true;                       // aim at the ray's measured hit ([vr] aim_depth, `gun depth`)
 static float g_hit_min = 0.6f, g_hit_max = 60;        // metres along the ray searched: past the gun, to far out
@@ -446,6 +461,8 @@ static void init_draw_buffers() {
     if (buf[0]) g_gun_pivot_manual = swscanf_s(buf, L"%f,%f,%f", &g_gun_pivot[0], &g_gun_pivot[1], &g_gun_pivot[2]) == 3;
     GetPrivateProfileStringW(L"vr", L"gun_clip", L"", buf, 64, ini.c_str());
     if (buf[0]) g_gun_clip = float(_wtof(buf));
+    GetPrivateProfileStringW(L"vr", L"gun_recoil", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_gun_recoil = std::clamp(float(_wtof(buf)), 0.f, 1.f);
     GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_converge = float(_wtof(buf));
     g_aim_depth = GetPrivateProfileIntW(L"vr", L"aim_depth", 1, ini.c_str()) != 0;
@@ -487,6 +504,7 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "pivot") memcpy(g_gun_pivot, v, sizeof(g_gun_pivot)), g_gun_pivot_manual = true;
     else if (name == "autopivot") g_gun_pivot_manual = false, g_pivot_frames = g_pivot_still = 0, g_pivot_locked = false;
     else if (name == "clip") g_gun_clip = v[0];
+    else if (name == "recoil") g_gun_recoil = std::clamp(v[0], 0.f, 1.f);
     else if (name == "converge") g_aim_converge = v[0];
     else if (name == "hudmask") g_aim_hud_mask = v[0];
     else if (name == "laser") g_laser_length = v[0], g_aim_laser = v[0] > 0;
@@ -665,14 +683,45 @@ static void apply_aim_cam(const vr::Pose& cam) {
     float qf[3][3];
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j) qf[i][j] = q.m[i][0] * g_gun_fix[0][j] + q.m[i][1] * g_gun_fix[1][j] + q.m[i][2] * g_gun_fix[2][j];
-    float m[16] = {};
+    memset(g_draw_m, 0, sizeof(g_draw_m));
     for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) m[i * 4 + j] = qf[i][j] * s;
-        m[i * 4 + 3] = q.m[i][3] - s * (qf[i][0] * g_gun_pivot[0] + qf[i][1] * g_gun_pivot[1] + qf[i][2] * g_gun_pivot[2]);
+        for (int j = 0; j < 3; ++j) g_draw_m[i * 4 + j] = qf[i][j] * s;
+        g_draw_qt[i] = q.m[i][3];
     }
-    m[12] = 1;
-    m[13] = g_gun_pivot[2] + g_gun_clip;
-    g_ctx->UpdateSubresource(g_draw_cb[1], 0, nullptr, m, 0, 0);
+    g_draw_m[12] = 1;
+    const bool moved = g_pivot_locked && g_grip_last_valid;
+    g_clip_base = moved ? g_grip_last[2] : g_gun_pivot[2];
+    set_draw_grip(moved ? g_grip_last : g_gun_pivot);
+}
+
+// The arm/gun transform (slot b13) for the grip at `grip` (game aim view): the hand holds the
+// resting grip (g_gun_pivot) and gun_recoil of the way to `grip`; the cut is gun_clip behind the
+// nearer of `grip` and g_clip_base.
+static void set_draw_grip(const float grip[3]) {
+    float pe[3];
+    for (int j = 0; j < 3; ++j) pe[j] = g_gun_pivot[j] + (1 - g_gun_recoil) * (grip[j] - g_gun_pivot[j]);
+    for (int i = 0; i < 3; ++i)
+        g_draw_m[i * 4 + 3] = g_draw_qt[i] - (g_draw_m[i * 4] * pe[0] + g_draw_m[i * 4 + 1] * pe[1] + g_draw_m[i * 4 + 2] * pe[2]);
+    g_clip_base = std::max(g_clip_base, grip[2]);
+    g_draw_m[13] = g_clip_base + g_gun_clip;
+    if (g_draw_cb[1]) g_ctx->UpdateSubresource(g_draw_cb[1], 0, nullptr, g_draw_m, 0, 0);
+}
+
+// An arm/gun draw in aim mode once the grip is fixed: the grip draw gives this frame's grip, and
+// the draws after it follow it (those before it had last frame's; see g_grip_seen).
+static void track_grip() {
+    float t[3];
+    if (!g_pivot_locked || g_grip_seen || g_draw_count != g_grip_mesh || !model_translation(t) || !(t[2] < -1 && t[2] > -8))
+        return;
+    g_grip_seen = true;
+    memcpy(g_grip_now, t, sizeof(t));
+    static int logged;
+    if (fabsf(t[2] - g_gun_pivot[2]) > 0.05f && logged < 20) {
+        ++logged;
+        logf("aim: recoil, grip at %.2f,%.2f,%.2f (rests at %.2f,%.2f,%.2f)", t[0], t[1], t[2], g_gun_pivot[0],
+             g_gun_pivot[1], g_gun_pivot[2]);
+    }
+    set_draw_grip(t);
 }
 
 static void relock_aim() {
@@ -1221,6 +1270,9 @@ static void set_eye_offsets() {
         ++g_pivot_frames;
     }
     g_pivot_seen = false;
+    g_grip_last_valid = g_grip_seen;
+    if (g_grip_seen) memcpy(g_grip_last, g_grip_now, sizeof(g_grip_last));
+    g_grip_seen = false;
     if (!aim) g_anchor_set = false;
     g_aim_mode = aim;
     g_gun_run = 0;
@@ -3054,6 +3106,7 @@ static void draw_stereo(DrawFn draw) {
             g_gun_run = 1;
             gun = true;
             find_gun_pivot();
+            track_grip();
         } else if (g_gun_run == 1) {
             const bool trace = g_gun_run == 1 && g_aim_trace > 0;
             if (trace) {  // the first world draw: the camera it was drawn with

@@ -165,7 +165,8 @@ The "default" column is the mod's own value when a key is missing.
 | `hand_pitch` | 0 | degrees the aim is tilted up from the controller's pointing axis |
 | `hand_offset` | 0,0,0 | grip point in the controller's frame (x right, y up, z back), metres |
 | `gun_scale` | 0.6 | gun and hand size |
-| `gun_clip` | 2 | how much forearm and sleeve shows behind the hand (game units) |
+| `gun_clip` | 2 | how much forearm and sleeve shows behind the hand (game units); the cut follows the grip through the recoil |
+| `gun_recoil` | 0.25 | share of the game's recoil movement the gun makes in the hand, 0..1 (Dan's revolver kicks the grip about 4 units back and up; whole, it hits the player's face); the kick's rotation is always kept |
 | `gun_pivot` | auto | the gun's grip in the game's aim view (x,y,z); found per character when aiming starts |
 | `gun_align` | 1 | turn the gun straight in the hand, so its barrel points where the shot goes (the game angles each gun in towards its screen centre: Dan's ~10°); 0 = held as the game holds it, the shot still following the barrel |
 | `aim_laser` | 0 | a laser from the gun in aim mode (the game has none) |
