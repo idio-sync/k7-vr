@@ -204,6 +204,12 @@ the four corners of 6-index quads.
 
 ## Gotchas
 
+- Players start the game from Steam, which loads the Steam overlay into it; `run.ps1` alone
+  doesn't. The overlay detours every new swap chain's methods as read from its vtable, one saved
+  original per method, so the mod hooks only private vtable copies of the game's own factory and
+  swap chain, never DXGI's shared vtables (v0.1.1 and older did: a stack overflow before the
+  window opened, Steam launches only). Test D3D/DXGI hook changes with `run.ps1 -SteamOverlay`.
+
 - `log` lines are written when the script is read; `mark` lines when their turn comes. Wait on
   `mark` lines (or log timestamps).
 - The keyboard is ignored in play once the pad has been used; drive gameplay with the pad.

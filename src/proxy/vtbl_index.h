@@ -28,5 +28,12 @@ extern const int ctx_UpdateSubresource;
 extern const int sc_Present;
 extern const int sc_ResizeBuffers;
 extern const int sc1_Present1;
+extern const int factory_CreateSwapChain;
+extern const int factory2_CreateSwapChainForHwnd;
+
+// Vtable lengths of each interface level, oldest first (IDXGISwapChain..4, IDXGIFactory..7):
+// a private copy of an object's vtable copies as many slots as the newest level it answers to.
+extern const int sc_slot_counts[5];
+extern const int factory_slot_counts[8];
 
 }  // namespace k7::vt

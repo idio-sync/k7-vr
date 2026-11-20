@@ -3,7 +3,8 @@
 param(
     [string]$Game = 'C:\Users\Virtual\killer7-vr-game',
     [switch]$Stop,
-    [switch]$Normal   # start with a normal window (headset playtests) instead of minimized
+    [switch]$Normal,  # start with a normal window (headset playtests) instead of minimized
+    [switch]$SteamOverlay  # start as Steam does, Steam overlay loaded (out\steam_launch.exe; Steam running)
 )
 $ErrorActionPreference = 'Stop'
 $pidFile = Join-Path $Game 'k7vr\pid.txt'
@@ -32,6 +33,18 @@ Get-ChildItem (Join-Path $Game 'k7vr') -File | Where-Object Name -match '^((shot
 # A pipeline cache would skip D3DCompile, and with it the probe's shader patches.
 Remove-Item (Join-Path $Game 'Shaders\pipeline.cache') -ErrorAction SilentlyContinue
 # The probe keeps the window minimized (k7vr.ini minimized=1); start it that way too.
+if ($SteamOverlay) {
+    # Players start the game from Steam, which loads its overlay into the game.
+    $steam = (Get-ItemProperty HKCU:\Software\Valve\Steam).SteamPath
+    $overlay = Join-Path $steam 'GameOverlayRenderer.dll'
+    $launcher = Join-Path (Split-Path $PSScriptRoot -Parent) 'out\steam_launch.exe'
+    $out = & $launcher (Join-Path $Game 'Killer7Win.exe') $Game $overlay
+    $out | Write-Output
+    $m = $out | Select-String 'started PID (\d+)'
+    if (-not $m) { throw 'steam_launch did not start the game' }
+    Set-Content $pidFile $m.Matches[0].Groups[1].Value
+    return
+}
 $style = if ($Normal) { 'Normal' } else { 'Minimized' }
 $p = Start-Process (Join-Path $Game 'Killer7Win.exe') -WorkingDirectory $Game -WindowStyle $style -PassThru
 Set-Content $pidFile $p.Id

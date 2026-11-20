@@ -78,6 +78,51 @@ constexpr int kMaxCallers = 16;
 char g_name[MAX_PATH + 32];
 char g_line[512];
 
+// A stack overflow is usually a recursion: count the code addresses over the whole stack (the
+// ones that repeat are the loop) and list the oldest callers, near the stack's base (what
+// started it).
+void report_recursion(const uintptr_t* sp) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(sp, &mbi, sizeof(mbi))) return;
+    const auto* top = reinterpret_cast<const uintptr_t*>(static_cast<const uint8_t*>(mbi.BaseAddress) + mbi.RegionSize);
+    constexpr int kDistinct = 128;
+    static uintptr_t addr[kDistinct];
+    static int count[kDistinct];
+    int distinct = 0;
+    for (const uintptr_t* p = sp; p < top; ++p) {
+        uintptr_t v;
+        if (!read_slot(p, &v) || !is_module_code(v)) continue;
+        int i = 0;
+        while (i < distinct && addr[i] != v) ++i;
+        if (i == distinct) {
+            if (distinct == kDistinct) continue;
+            addr[distinct] = v;
+            count[distinct++] = 0;
+        }
+        ++count[i];
+    }
+    logf("  stack %u KB; code addresses seen most often (a recursion repeats them):",
+         unsigned((top - sp) * sizeof(uintptr_t) / 1024));
+    for (int shown = 0; shown < 8; ++shown) {
+        int best = -1;
+        for (int i = 0; i < distinct; ++i)
+            if (count[i] > 1 && (best < 0 || count[i] > count[best])) best = i;
+        if (best < 0) break;
+        name_address(addr[best], g_name, sizeof(g_name));
+        logf("    %5d x %s", count[best], g_name);
+        count[best] = -count[best];  // shown
+    }
+    logf("  oldest code addresses on the stack (what started it):");
+    int found = 0;
+    for (const uintptr_t* p = top - 1; p >= sp && found < kMaxCallers; --p) {
+        uintptr_t v;
+        if (!read_slot(p, &v) || !is_module_code(v)) continue;
+        name_address(v, g_name, sizeof(g_name));
+        logf("    base-0x%04x: %s", unsigned((top - p) * sizeof(uintptr_t)), g_name);
+        ++found;
+    }
+}
+
 void report(EXCEPTION_POINTERS* ep, const char* name) {
     const EXCEPTION_RECORD* er = ep->ExceptionRecord;
     const CONTEXT* c = ep->ContextRecord;
@@ -109,6 +154,33 @@ void report(EXCEPTION_POINTERS* ep, const char* name) {
         ++found;
     }
     if (!found) logf("  (no code addresses on the stack)");
+    if (er->ExceptionCode == EXCEPTION_STACK_OVERFLOW) report_recursion(sp);
+}
+
+struct ReportJob {
+    EXCEPTION_POINTERS* ep;
+    const char* name;
+};
+
+DWORD WINAPI report_thread(void* p) {
+    auto* job = static_cast<ReportJob*>(p);
+    report(job->ep, job->name);
+    return 0;
+}
+
+// Reports on a fresh thread, so a stack overflow (or a nearly full stack) can't take the report
+// down with it. If no thread starts, the report runs here, unless the stack is the problem.
+// (A thread held at the loader lock the crashing thread owns reports nothing within the wait.)
+void report_safely(EXCEPTION_POINTERS* ep, const char* name) {
+    static ReportJob job;  // outlives a wait that times out
+    job = {ep, name};
+    if (HANDLE t = CreateThread(nullptr, 256 * 1024, report_thread, &job, 0, nullptr)) {
+        WaitForSingleObject(t, 5000);
+        CloseHandle(t);
+        return;
+    }
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) report(ep, name);
+    else logf("CRASH? stack overflow at %p; no thread to report it from", ep->ExceptionRecord->ExceptionAddress);
 }
 
 LONG CALLBACK on_exception(EXCEPTION_POINTERS* ep) {
@@ -116,7 +188,7 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* ep) {
     if (!name) return EXCEPTION_CONTINUE_SEARCH;
     const int n = g_reports.fetch_add(1);
     if (n < kMaxReports && !g_reporting.exchange(true)) {
-        report(ep, name);
+        report_safely(ep, name);
         g_last_addr = reinterpret_cast<uintptr_t>(ep->ExceptionRecord->ExceptionAddress);
         g_reporting = false;
     } else if (n == kMaxReports) {

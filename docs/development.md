@@ -78,7 +78,10 @@ Running the game overwrites `k7vr\k7vr.log` and deletes the previous run's `pair
   so the copies to the eyes and panels run as in a headset). It rewrites the whole file.
 - `tools\run.ps1` / `-Stop` / `-Normal` start and stop the copy. `-Stop` only ends the process
   `run.ps1` started (its PID is in `k7vr\pid.txt`); `-Normal` starts with a normal window for
-  headset playtests.
+  headset playtests. `-SteamOverlay` starts it as Steam does, with Steam's overlay loaded into
+  the game (`out\steam_launch.exe`; the Steam client must be running). Players start the game
+  from Steam, so check D3D/DXGI hook changes this way too: the overlay hooks swap chains as they
+  are made, and a hook in DXGI's shared vtables once made the two call each other forever.
 - `tools\cmd.ps1 'key SPACE' 'wait 2000' 'shot'` or `tools\cmd.ps1 -File tools\scripts\new_game.txt`
   sends commands to the running game. The list is at the top of `src\proxy\control.cpp`: input
   (keys, mouse, pad), screenshots, stereo pairs, per-draw captures with `capture N...`, the

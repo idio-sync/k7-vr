@@ -3,7 +3,7 @@
 // draw list (targets, viewports, shaders, the GX projection from constant buffer 0) and a PNG.
 #include "common.h"
 
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 #include <psapi.h>
 
 #include <algorithm>
@@ -3750,42 +3750,110 @@ static HRESULT STDMETHODCALLTYPE hk_ResizeBuffers(IDXGISwapChain* sc, UINT count
     return o_ResizeBuffers(sc, count, w, h, fmt, flags);
 }
 
-// A throwaway swap chain on the game's device gives us the swap chain vtable to patch.
+// ---- The game's swap chain ----
+//
+// The hooks sit in private copies of the vtables of the game's own DXGI factory and swap chain,
+// never in DXGI's shared vtables. The Steam overlay hooks every new swap chain by reading the
+// methods out of its vtable and detouring them, keeping one "original" per method. When the
+// shared vtable already held the mod's hooks (patched through a throwaway swap chain, before the
+// game made its own), the overlay took the mod's hook as its original while the mod's original
+// led into the overlay: the two called each other until the stack overflowed, at the game's
+// first ResizeBuffers or Present, before its window opened. With private copies the overlay
+// (or anything else that hooks the same way) only ever finds DXGI's own methods.
+
+// Gives `obj` a private copy of its vtable (as many slots as the newest interface level in
+// `iids` it answers to as the same object, `counts` holding each level's length).
+static void** private_vtable(IUnknown* obj, const IID* const* iids, const int* counts, int levels,
+                             std::vector<void*>& copy) {
+    int slots = counts[0];
+    for (int i = 1; i < levels; ++i) {
+        IUnknown* q = nullptr;
+        if (SUCCEEDED(obj->QueryInterface(*iids[i], reinterpret_cast<void**>(&q)))) {
+            if (q == obj) slots = counts[i];
+            q->Release();
+        }
+    }
+    void** real = *reinterpret_cast<void***>(obj);
+    copy.assign(real, real + slots);
+    *reinterpret_cast<void***>(obj) = copy.data();
+    return copy.data();
+}
+
+template <typename T>
+static void hook_slot(void** table, int slot, T hook_fn, T* orig) {
+    *reinterpret_cast<void**>(orig) = table[slot];
+    table[slot] = reinterpret_cast<void*>(hook_fn);
+}
+
+static IDXGISwapChain* g_game_sc;
+
+static void hook_game_swapchain(IDXGISwapChain* sc) {
+    static std::vector<void*> table;  // lives as long as the swap chain may
+    if (sc == g_game_sc) return;
+    if (g_game_sc) {
+        logf("swap chain: the game made another one (%p); the hooks stay on the first", static_cast<void*>(sc));
+        return;
+    }
+    static const IID* const iids[] = {&__uuidof(IDXGISwapChain), &__uuidof(IDXGISwapChain1),
+                                      &__uuidof(IDXGISwapChain2), &__uuidof(IDXGISwapChain3),
+                                      &__uuidof(IDXGISwapChain4)};
+    void** t = private_vtable(sc, iids, vt::sc_slot_counts, 5, table);
+    hook_slot(t, vt::sc_Present, &hk_Present, &o_Present);
+    hook_slot(t, vt::sc_ResizeBuffers, &hk_ResizeBuffers, &o_ResizeBuffers);
+    if (int(table.size()) > vt::sc1_Present1) hook_slot(t, vt::sc1_Present1, &hk_Present1, &o_Present1);
+    g_game_sc = sc;
+    logf("swap chain %p hooked (Present slot %d, Present1 slot %d, %d slots copied)", static_cast<void*>(sc),
+         vt::sc_Present, vt::sc1_Present1, int(table.size()));
+}
+
+using CreateSwapChain_t = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*,
+                                                      IDXGISwapChain**);
+static CreateSwapChain_t o_CreateSwapChain;
+static HRESULT STDMETHODCALLTYPE hk_CreateSwapChain(IDXGIFactory* f, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* d,
+                                                    IDXGISwapChain** out) {
+    const HRESULT hr = o_CreateSwapChain(f, dev, d, out);
+    if (SUCCEEDED(hr) && out && *out) hook_game_swapchain(*out);
+    return hr;
+}
+
+using CreateSwapChainForHwnd_t = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, HWND,
+                                                             const DXGI_SWAP_CHAIN_DESC1*,
+                                                             const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*,
+                                                             IDXGISwapChain1**);
+static CreateSwapChainForHwnd_t o_CreateSwapChainForHwnd;
+static HRESULT STDMETHODCALLTYPE hk_CreateSwapChainForHwnd(IDXGIFactory2* f, IUnknown* dev, HWND wnd,
+                                                           const DXGI_SWAP_CHAIN_DESC1* d,
+                                                           const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs,
+                                                           IDXGIOutput* output, IDXGISwapChain1** out) {
+    const HRESULT hr = o_CreateSwapChainForHwnd(f, dev, wnd, d, fs, output, out);
+    if (SUCCEEDED(hr) && out && *out) hook_game_swapchain(*out);
+    return hr;
+}
+
+// The game makes its swap chain with the factory behind its device (it imports no DXGI
+// function), so that factory object gets the hooked swap chain creation.
 static void hook_swapchain(ID3D11Device* dev) {
+    static std::vector<void*> table;
     IDXGIDevice* dxdev = nullptr;
     IDXGIAdapter* adapter = nullptr;
     IDXGIFactory* factory = nullptr;
     if (FAILED(dev->QueryInterface(IID_PPV_ARGS(&dxdev)))) return;
     if (SUCCEEDED(dxdev->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
-        HWND wnd = CreateWindowExW(0, L"STATIC", L"k7vr", WS_OVERLAPPED, 0, 0, 64, 64, nullptr, nullptr, nullptr,
-                                   nullptr);
-        DXGI_SWAP_CHAIN_DESC d{};
-        d.BufferCount = 1;
-        d.BufferDesc.Width = 64;
-        d.BufferDesc.Height = 64;
-        d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        d.OutputWindow = wnd;
-        d.SampleDesc.Count = 1;
-        d.Windowed = TRUE;
-        d.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        IDXGISwapChain* sc = nullptr;
-        if (SUCCEEDED(factory->CreateSwapChain(dev, &d, &sc))) {
-            patch_vtbl(sc, vt::sc_Present, reinterpret_cast<void*>(&hk_Present), reinterpret_cast<void**>(&o_Present));
-            patch_vtbl(sc, vt::sc_ResizeBuffers, reinterpret_cast<void*>(&hk_ResizeBuffers),
-                       reinterpret_cast<void**>(&o_ResizeBuffers));
-            IDXGISwapChain1* sc1 = nullptr;
-            if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc1)))) {
-                patch_vtbl(sc1, vt::sc1_Present1, reinterpret_cast<void*>(&hk_Present1),
-                           reinterpret_cast<void**>(&o_Present1));
-                sc1->Release();
-            }
-            sc->Release();
-            logf("swap chain hooked (Present slot %d, Present1 slot %d)", vt::sc_Present, vt::sc1_Present1);
-        } else {
-            logf("swap chain hook: CreateSwapChain failed");
+        if (table.empty()) {
+            static const IID* const iids[] = {&__uuidof(IDXGIFactory),  &__uuidof(IDXGIFactory1),
+                                              &__uuidof(IDXGIFactory2), &__uuidof(IDXGIFactory3),
+                                              &__uuidof(IDXGIFactory4), &__uuidof(IDXGIFactory5),
+                                              &__uuidof(IDXGIFactory6), &__uuidof(IDXGIFactory7)};
+            void** t = private_vtable(factory, iids, vt::factory_slot_counts, 8, table);
+            hook_slot(t, vt::factory_CreateSwapChain, &hk_CreateSwapChain, &o_CreateSwapChain);
+            if (int(table.size()) > vt::factory2_CreateSwapChainForHwnd)
+                hook_slot(t, vt::factory2_CreateSwapChainForHwnd, &hk_CreateSwapChainForHwnd,
+                          &o_CreateSwapChainForHwnd);
+            logf("DXGI factory %p: swap chain creation hooked (%d slots copied)", static_cast<void*>(factory),
+                 int(table.size()));
         }
-        DestroyWindow(wnd);
+    } else {
+        logf("swap chain hook: no DXGI factory behind the device");
     }
     if (factory) factory->Release();
     if (adapter) adapter->Release();

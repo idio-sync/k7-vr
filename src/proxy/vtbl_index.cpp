@@ -3,7 +3,7 @@
 #define CINTERFACE
 #define D3D11_NO_HELPERS  // the CD3D11_* helpers need the C++ interfaces
 #include <d3d11_4.h>
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 
 #include <cstddef>
 
@@ -38,5 +38,14 @@ const int ctx_UpdateSubresource = SLOT(ID3D11DeviceContext, UpdateSubresource);
 const int sc_Present = SLOT(IDXGISwapChain, Present);
 const int sc_ResizeBuffers = SLOT(IDXGISwapChain, ResizeBuffers);
 const int sc1_Present1 = SLOT(IDXGISwapChain1, Present1);
+const int factory_CreateSwapChain = SLOT(IDXGIFactory, CreateSwapChain);
+const int factory2_CreateSwapChainForHwnd = SLOT(IDXGIFactory2, CreateSwapChainForHwnd);
+
+#define COUNT(iface) int(sizeof(iface##Vtbl) / sizeof(void*))
+const int sc_slot_counts[5] = {COUNT(IDXGISwapChain), COUNT(IDXGISwapChain1), COUNT(IDXGISwapChain2),
+                               COUNT(IDXGISwapChain3), COUNT(IDXGISwapChain4)};
+const int factory_slot_counts[8] = {COUNT(IDXGIFactory),  COUNT(IDXGIFactory1), COUNT(IDXGIFactory2),
+                                    COUNT(IDXGIFactory3), COUNT(IDXGIFactory4), COUNT(IDXGIFactory5),
+                                    COUNT(IDXGIFactory6), COUNT(IDXGIFactory7)};
 
 }  // namespace k7::vt

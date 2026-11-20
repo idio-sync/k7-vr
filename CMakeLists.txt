@@ -63,3 +63,8 @@ add_test(NAME headmath COMMAND k7vr_tests)
 add_executable(k7vr_ini_tests tests/test_ini.cpp src/proxy/ini_bindings.cpp)
 target_compile_options(k7vr_ini_tests PRIVATE /W4 /utf-8)
 add_test(NAME ini COMMAND k7vr_ini_tests)
+
+# Starts the test copy as a Steam launch would, Steam overlay included (tools\run.ps1 -SteamOverlay).
+add_executable(steam_launch tools/steam_launch.cpp)
+target_compile_definitions(steam_launch PRIVATE UNICODE _UNICODE)
+target_compile_options(steam_launch PRIVATE /W4 /utf-8)
