@@ -70,6 +70,15 @@ void game_ndc_to_eye_clip(const float head[12], const float px[4], const float p
 // projection (4x4, row-major), clipped to NDC.
 float ortho_cover(const float* xy, int count, const float mv0[12], const float proj[16]);
 
+// ---- Recoil kept clear of the eyes (hooks_d3d.cpp, gun_recoil) ----
+
+// The largest share k (0..k_max) of a recoil kick `d` for which every point r_i + base + k*d,
+// mapped by the arm transform `arm` (3x4 rows), stays at least `clearance` from `eye`, or, for a
+// point already nearer than that at k = 0, no nearer than it is there (all in the game camera's
+// space, game units; r_i relative to the resting grip, `base` the part of the kick already kept).
+float recoil_share(const float arm[12], const float (*points)[3], int n, const float base[3], const float d[3],
+                   const float eye[3], float clearance, float k_max);
+
 // ---- The static between scenes, around the player (hooks_d3d.cpp, "static surround") ----
 
 // Elevation (radians, up > 0) of a horizontal line of the game's picture at NDC y `ndc_y` (-1..1,

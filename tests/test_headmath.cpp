@@ -324,7 +324,38 @@ static void test_point_to_eye_clip() {
     }
 }
 
+// ---- Recoil kept clear of the eyes ----
+
+static void test_recoil_share() {
+    // The arm transform: identity rotation, the hand 4 units ahead. A kick of 3 units straight back.
+    const float arm[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -4};
+    const float grip[1][3] = {{0, 0, 0}};
+    const float none[3] = {0, 0, 0};
+    const float kick[3] = {0, 0, 3};
+    const float eye[3] = {0, 0, 0};
+    // Far enough even with the whole kick (the grip ends 1 unit away, clearance 0.5): all of it.
+    CHECK_NEAR(recoil_share(arm, grip, 1, none, kick, eye, 0.5f, 1), 1, 1e-6);
+    // ...unless the gun's own share is less.
+    CHECK_NEAR(recoil_share(arm, grip, 1, none, kick, eye, 0.5f, 0.4f), 0.4, 1e-6);
+    // Clearance 2.5: the grip may come back to 2.5 units from the eye, i.e. 1.5 of the 3 (0.5).
+    CHECK_NEAR(recoil_share(arm, grip, 1, none, kick, eye, 2.5f, 1), 0.5, 1e-3);
+    // A second point (the forearm's cut end, 2 units behind the grip) nearer the eye limits it more:
+    // it starts 2 units away, so with clearance 1.5 it may come 0.5 back (a sixth of the kick).
+    const float two[2][3] = {{0, 0, 0}, {0, 0, 2}};
+    CHECK_NEAR(recoil_share(arm, two, 2, none, kick, eye, 1.5f, 1), 1 / 6.0, 1e-3);
+    // Already nearer than the clearance at rest: it may not come any nearer (none of a kick back)...
+    CHECK_NEAR(recoil_share(arm, two, 2, none, kick, eye, 3.0f, 1), 0, 1e-4);
+    // ...but a kick that takes it no nearer is kept whole.
+    const float up[3] = {0, 3, 0};
+    CHECK_NEAR(recoil_share(arm, two, 2, none, up, eye, 3.0f, 1), 1, 1e-6);
+    // The part of the kick already applied (`base`) counts: the grip raised 3 units first, then
+    // kicked back 3: from (0,3,-4) the eye is 5 away, so clearance 4.5 allows it to come back to
+    // (0,3,-sqrt(4.5^2-9)) = z -3.354, i.e. 0.646 of 3 units (0.215).
+    CHECK_NEAR(recoil_share(arm, grip, 1, up, kick, eye, 4.5f, 1), (4 - std::sqrt(4.5 * 4.5 - 9)) / 3, 1e-3);
+}
+
 int main() {
+    test_recoil_share();
     test_band_elevation();
     test_surround_anchor();
     test_sphere_point();

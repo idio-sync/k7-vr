@@ -404,10 +404,14 @@ static float g_gun_clip = 2.0f;                       // the arm (sleeve) is cut
 // cut fixed behind where the grip rested sliced the hand open (seen through its back). The cut
 // sits behind the nearer of the rest grip and the last frame's, and moves back during a frame
 // if that frame's grip draw comes nearer still (the arm pieces may be drawn before the grip).
-// The recoil itself is damped in the hand: Dan's revolver kicks the grip 2.3 units back and 3.2
-// up, which in the hand put the gun and forearm in the player's face. [vr] gun_recoil (or `gun
-// recoil`): the share of the kick's movement kept (its rotation is kept whole).
-static float g_gun_recoil = 0.25f;
+// The recoil per gun ([vr] gun_recoil = MESH:K,... by the grip draw's vertex count, which the log
+// names when aiming: Dan's revolver 1269, Garcian's pistol 690). Unlisted guns kick as in the game.
+// A listed gun makes up to K of its kick's movement (its rotation is always whole), held back
+// only as far as needed to keep the grip and the forearm's cut end [vr] gun_recoil_clearance_m
+// from the eyes: Dan's revolver kicks the grip 2.3 units back and 3.2 up, which whole put the gun
+// and forearm in the player's face.
+static std::vector<std::pair<UINT, float>> g_recoil_guns = {{1269, 1.f}};
+static float g_recoil_clearance = 0.3f;  // metres
 static bool g_grip_seen;                              // this frame's grip draw has been seen
 static float g_grip_now[3], g_grip_last[3];           // its position (game aim view), and last frame's
 static bool g_grip_last_valid;
@@ -461,8 +465,15 @@ static void init_draw_buffers() {
     if (buf[0]) g_gun_pivot_manual = swscanf_s(buf, L"%f,%f,%f", &g_gun_pivot[0], &g_gun_pivot[1], &g_gun_pivot[2]) == 3;
     GetPrivateProfileStringW(L"vr", L"gun_clip", L"", buf, 64, ini.c_str());
     if (buf[0]) g_gun_clip = float(_wtof(buf));
-    GetPrivateProfileStringW(L"vr", L"gun_recoil", L"", buf, 64, ini.c_str());
-    if (buf[0]) g_gun_recoil = std::clamp(float(_wtof(buf)), 0.f, 1.f);
+    GetPrivateProfileStringW(L"vr", L"gun_recoil", L"1269:1", buf, 64, ini.c_str());
+    g_recoil_guns.clear();
+    for (wchar_t *ctx = nullptr, *tok = wcstok_s(buf, L", ", &ctx); tok; tok = wcstok_s(nullptr, L", ", &ctx)) {
+        unsigned mesh = 0;
+        float k = 1;
+        if (swscanf_s(tok, L"%u:%f", &mesh, &k) == 2) g_recoil_guns.push_back({mesh, std::clamp(k, 0.f, 1.f)});
+    }
+    GetPrivateProfileStringW(L"vr", L"gun_recoil_clearance_m", L"", buf, 64, ini.c_str());
+    if (buf[0]) g_recoil_clearance = float(_wtof(buf));
     GetPrivateProfileStringW(L"vr", L"aim_converge_m", L"", buf, 64, ini.c_str());
     if (buf[0]) g_aim_converge = float(_wtof(buf));
     g_aim_depth = GetPrivateProfileIntW(L"vr", L"aim_depth", 1, ini.c_str()) != 0;
@@ -504,7 +515,12 @@ void set_gun_param(const std::string& name, const float v[3]) {
     else if (name == "pivot") memcpy(g_gun_pivot, v, sizeof(g_gun_pivot)), g_gun_pivot_manual = true;
     else if (name == "autopivot") g_gun_pivot_manual = false, g_pivot_frames = g_pivot_still = 0, g_pivot_locked = false;
     else if (name == "clip") g_gun_clip = v[0];
-    else if (name == "recoil") g_gun_recoil = std::clamp(v[0], 0.f, 1.f);
+    else if (name == "recoil") {  // this aim session's gun
+        const float k = std::clamp(v[0], 0.f, 1.f);
+        auto it = std::find_if(g_recoil_guns.begin(), g_recoil_guns.end(), [](auto& g) { return g.first == g_grip_mesh; });
+        if (it != g_recoil_guns.end()) it->second = k;
+        else g_recoil_guns.push_back({g_grip_mesh, k});
+    } else if (name == "clearance") g_recoil_clearance = v[0];
     else if (name == "converge") g_aim_converge = v[0];
     else if (name == "hudmask") g_aim_hud_mask = v[0];
     else if (name == "laser") g_laser_length = v[0], g_aim_laser = v[0] > 0;
@@ -695,11 +711,40 @@ static void apply_aim_cam(const vr::Pose& cam) {
 }
 
 // The arm/gun transform (slot b13) for the grip at `grip` (game aim view): the hand holds the
-// resting grip (g_gun_pivot) and gun_recoil of the way to `grip`; the cut is gun_clip behind the
-// nearer of `grip` and g_clip_base.
+// resting grip (g_gun_pivot) and the gun's share of the way to `grip` (g_recoil_guns); the cut is
+// gun_clip behind the nearer of `grip` and g_clip_base.
 static void set_draw_grip(const float grip[3]) {
+    const float d[3] = {grip[0] - g_gun_pivot[0], grip[1] - g_gun_pivot[1], grip[2] - g_gun_pivot[2]};
+    float kept[3] = {d[0], d[1], d[2]};  // the kick's movement the hand makes
+    auto it = std::find_if(g_recoil_guns.begin(), g_recoil_guns.end(), [](auto& g) { return g.first == g_grip_mesh; });
+    if (it != g_recoil_guns.end() && d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 1e-6f) {
+        // Up, sideways and forward: the gun's share whole. Back (towards the game camera, +z, which
+        // in the hand is towards the player's face): as much of that share as keeps clear of the eyes.
+        const float K = it->second;
+        const float base[3] = {K * d[0], K * d[1], K * std::min(d[2], 0.f)};
+        const float back[3] = {0, 0, std::max(d[2], 0.f)};
+        // The eyes (between them) in the game camera's space, and the arm transform as it stands.
+        float eye[3] = {};
+        for (int e = 0; e < 2; ++e)
+            for (int j = 0; j < 3; ++j)
+                for (int i = 0; i < 3; ++i) eye[j] -= 0.5f * g_eyes[e].head[i * 4 + j] * g_eyes[e].head[i * 4 + 3];
+        float arm[12];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) arm[i * 4 + j] = g_draw_m[i * 4 + j];
+            arm[i * 4 + 3] = g_draw_qt[i];
+        }
+        const float points[2][3] = {{0, 0, 0}, {0, 0, g_gun_clip}};  // the grip, the forearm's cut end
+        const float k = back[2] > 0 ? vr::recoil_share(arm, points, 2, base, back, eye, g_recoil_clearance / vr::unit(), K) : K;
+        for (int j = 0; j < 3; ++j) kept[j] = base[j] + k * back[j];
+        static int logged;
+        if (k < K - 0.01f && logged < 20) {
+            ++logged;
+            logf("aim: recoil kept %.2f of the %.2f units back (of %.2f; clear of the eyes by %.2f m)", k * back[2],
+                 back[2], K, g_recoil_clearance);
+        }
+    }
     float pe[3];
-    for (int j = 0; j < 3; ++j) pe[j] = g_gun_pivot[j] + (1 - g_gun_recoil) * (grip[j] - g_gun_pivot[j]);
+    for (int j = 0; j < 3; ++j) pe[j] = g_gun_pivot[j] + d[j] - kept[j];
     for (int i = 0; i < 3; ++i)
         g_draw_m[i * 4 + 3] = g_draw_qt[i] - (g_draw_m[i * 4] * pe[0] + g_draw_m[i * 4 + 1] * pe[1] + g_draw_m[i * 4 + 2] * pe[2]);
     g_clip_base = std::max(g_clip_base, grip[2]);

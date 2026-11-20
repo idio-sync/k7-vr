@@ -166,7 +166,8 @@ The "default" column is the mod's own value when a key is missing.
 | `hand_offset` | 0,0,0 | grip point in the controller's frame (x right, y up, z back), metres |
 | `gun_scale` | 0.6 | gun and hand size |
 | `gun_clip` | 2 | how much forearm and sleeve shows behind the hand (game units); the cut follows the grip through the recoil |
-| `gun_recoil` | 0.25 | share of the game's recoil movement the gun makes in the hand, 0..1 (Dan's revolver kicks the grip about 4 units back and up; whole, it hits the player's face); the kick's rotation is always kept |
+| `gun_recoil` | 1269:1 | per gun, `MESH:K,...`: the share K (0..1) of the game's recoil movement a listed gun makes in the hand, held back only as far as needed to keep it `gun_recoil_clearance_m` from the eyes; unlisted guns kick exactly as in the game. MESH is the grip's vertex count, logged when aiming starts ("gun mesh N vertices"): Dan's revolver 1269, Garcian's pistol 690. Dan's kick (about 4 units back and up) whole would hit the player's face. The kick's rotation is always kept |
+| `gun_recoil_clearance_m` | 0.3 | how near the eyes a listed gun's grip and the forearm's cut end may come during its recoil, metres |
 | `gun_pivot` | auto | the gun's grip in the game's aim view (x,y,z); found per character when aiming starts |
 | `gun_align` | 1 | turn the gun straight in the hand, so its barrel points where the shot goes (the game angles each gun in towards its screen centre: Dan's ~10°); 0 = held as the game holds it, the shot still following the barrel |
 | `aim_laser` | 0 | a laser from the gun in aim mode (the game has none) |

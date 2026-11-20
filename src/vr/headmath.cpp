@@ -186,6 +186,44 @@ float ortho_cover(const float* xy, int count, const float mv0[12], const float p
     return w * h / 4;
 }
 
+float recoil_share(const float arm[12], const float (*points)[3], int n, const float base[3], const float d[3],
+                   const float eye[3], float clearance, float k_max) {
+    auto dist2 = [&](int i, float k) {
+        float s = 0;
+        const float p[3] = {points[i][0] + base[0] + k * d[0], points[i][1] + base[1] + k * d[1],
+                            points[i][2] + base[2] + k * d[2]};
+        for (int r = 0; r < 3; ++r) {
+            const float v = arm[r * 4] * p[0] + arm[r * 4 + 1] * p[1] + arm[r * 4 + 2] * p[2] + arm[r * 4 + 3] - eye[r];
+            s += v * v;
+        }
+        return s;
+    };
+    float limit2[8];
+    if (n > 8) n = 8;
+    for (int i = 0; i < n; ++i) limit2[i] = std::fmin(clearance * clearance, dist2(i, 0) * (1 - 1e-5f));
+    auto clear = [&](float k) {
+        for (int i = 0; i < n; ++i)
+            if (dist2(i, k) < limit2[i]) return false;
+        return true;
+    };
+    // Out along the kick until a point comes too near, then the edge to within a fraction of a percent.
+    constexpr int kSteps = 20;
+    float good = 0;
+    for (int s = 1; s <= kSteps; ++s) {
+        float bad = k_max * s / kSteps;
+        if (clear(bad)) {
+            good = bad;
+            continue;
+        }
+        for (int i = 0; i < 16; ++i) {
+            const float mid = (good + bad) / 2;
+            (clear(mid) ? good : bad) = mid;
+        }
+        return good;
+    }
+    return k_max;
+}
+
 float band_elevation(float ndc_y, float tan_y) { return atanf(ndc_y * tan_y); }
 
 Pose surround_anchor(const float head0[12], const float head1[12]) {
