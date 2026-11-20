@@ -233,7 +233,102 @@ static void test_ortho_quad_cover() {
     CHECK_NEAR(ortho_cover(cross, 4, mv0, proj), (40.0 / 640) * (40.0 / 480), 0.002);
 }
 
+// ---- The static's surround ----
+
+static void test_band_elevation() {
+    // The horizon at the picture's middle; the game's 64-line bars at about +-24 degrees for a
+    // view whose vertical half-angle tangent is 0.6; symmetric; higher on screen is higher up.
+    CHECK_NEAR(band_elevation(0, 0.6f), 0, 1e-6);
+    const float edge = 1 - 2 * 64 / 480.f;
+    CHECK_NEAR(band_elevation(edge, 0.6f), std::atan(edge * 0.6), 1e-5);
+    CHECK_NEAR(band_elevation(edge, 0.6f) * 57.29578, 23.75, 0.05);
+    CHECK_NEAR(band_elevation(-edge, 0.6f), -band_elevation(edge, 0.6f), 1e-6);
+    if (!(band_elevation(0.2f, 0.6f) < band_elevation(0.5f, 0.6f))) {
+        std::printf("band_elevation should grow with the picture's y\n");
+        ++g_failures;
+    }
+}
+
+static void test_surround_anchor() {
+    // Both eyes looking 30 degrees right and 23 degrees up, 64 mm apart around (0.1, 1.2, -0.3) m:
+    // the anchor sits between them (in game units), facing their yaw, level.
+    const Pose look = rotation_yaw_pitch(0.5236f, 0.4f);
+    float h0[12], h1[12];
+    eye_space_transform(compose(translation(0.068f, 1.2f, -0.3f), look), 0.25f, h0);
+    eye_space_transform(compose(translation(0.132f, 1.2f, -0.3f), look), 0.25f, h1);
+    const Pose a = surround_anchor(h0, h1);
+    CHECK_NEAR(a.m[0][3], 0.4, 1e-4);
+    CHECK_NEAR(a.m[1][3], 4.8, 1e-4);
+    CHECK_NEAR(a.m[2][3], -1.2, 1e-4);
+    const Pose level = rotation_yaw_pitch(0.5236f, 0);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) CHECK_NEAR(a.m[r][c], level.m[r][c], 1e-4);
+}
+
+static void test_sphere_point() {
+    // Azimuth turns right from the anchor's front (-z), elevation up; radius in game units.
+    float p[3];
+    sphere_point(identity(), 16, 0, 0, p);
+    CHECK_NEAR(p[0], 0, 1e-5);
+    CHECK_NEAR(p[1], 0, 1e-5);
+    CHECK_NEAR(p[2], -16, 1e-5);
+    sphere_point(identity(), 16, 1.5707963f, 0, p);
+    CHECK_NEAR(p[0], 16, 1e-4);
+    CHECK_NEAR(p[2], 0, 1e-4);
+    sphere_point(identity(), 16, 0, 1.5707963f, p);
+    CHECK_NEAR(p[1], 16, 1e-4);
+    CHECK_NEAR(p[2], 0, 1e-4);
+    // An anchor turned 90 degrees right and moved: its front is +x, from its own position.
+    sphere_point(compose(translation(1, 2, 3), rotation_yaw_pitch(1.5707963f, 0)), 16, 0, 0, p);
+    CHECK_NEAR(p[0], 17, 1e-4);
+    CHECK_NEAR(p[1], 2, 1e-4);
+    CHECK_NEAR(p[2], 3, 1e-4);
+}
+
+static void test_point_to_eye_clip() {
+    float px[4], py[4], head[12], c[3];
+    projection_rows(-1, 1, -1, 1, px, py);
+    const float ahead[3] = {0, 0, -16}, right[3] = {16, 0, 0}, behind[3] = {0, 0, 16};
+    // Looking straight ahead: the point ahead is in the middle of the eye, 16 units away.
+    eye_space_transform(identity(), 0.25f, head);
+    point_to_eye_clip(head, px, py, ahead, c);
+    CHECK_NEAR(c[0] / c[2], 0, 1e-5);
+    CHECK_NEAR(c[1] / c[2], 0, 1e-5);
+    CHECK_NEAR(c[2], 16, 1e-4);
+    point_to_eye_clip(head, px, py, behind, c);
+    if (c[2] > 0) {
+        std::printf("a point behind the eye should have w <= 0, w = %f\n", c[2]);
+        ++g_failures;
+    }
+    // Head turned 90 degrees right: the point on the right is now in the middle, the one ahead
+    // is out of view (at the eye plane).
+    eye_space_transform(rotation_yaw_pitch(1.5707963f, 0), 0.25f, head);
+    point_to_eye_clip(head, px, py, right, c);
+    CHECK_NEAR(c[0] / c[2], 0, 1e-4);
+    CHECK_NEAR(c[2], 16, 1e-3);
+    point_to_eye_clip(head, px, py, ahead, c);
+    CHECK_NEAR(c[2], 0, 1e-3);
+    // Stereo: a near point ahead is right of centre for the left eye, left of it for the right.
+    const float near_pt[3] = {0, 0, -8};
+    eye_space_transform(translation(-0.032f, 0, 0), 0.25f, head);
+    point_to_eye_clip(head, px, py, near_pt, c);
+    if (!(c[0] / c[2] > 0)) {
+        std::printf("left eye: a point ahead should be right of centre, x = %f\n", c[0] / c[2]);
+        ++g_failures;
+    }
+    eye_space_transform(translation(0.032f, 0, 0), 0.25f, head);
+    point_to_eye_clip(head, px, py, near_pt, c);
+    if (!(c[0] / c[2] < 0)) {
+        std::printf("right eye: a point ahead should be left of centre, x = %f\n", c[0] / c[2]);
+        ++g_failures;
+    }
+}
+
 int main() {
+    test_band_elevation();
+    test_surround_anchor();
+    test_sphere_point();
+    test_point_to_eye_clip();
     test_ortho_quad_cover();
     test_frustum_rect_unclamped();
     test_game_ndc_to_eye_clip();

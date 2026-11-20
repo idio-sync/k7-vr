@@ -86,6 +86,8 @@ Running the game overwrites `k7vr\k7vr.log` and deletes the previous run's `pair
   sends commands to the running game. The list is at the top of `src\proxy\control.cpp`: input
   (keys, mouse, pad), screenshots, stereo pairs, per-draw captures with `capture N...`, the
   simulated head and hand, live aim tuning, `expect` checks, `sweep`, memory probes.
+  `waitlog [ms] TEXT` holds the script until a log line containing TEXT is written, for screens
+  too brief to hit with `wait` (e.g. `waitlog 30000 static surround on`, then `pair`).
 - `tools\sheet.ps1 -Out sheet.png -Last 4` tiles the newest screenshots.
 
 ### check.ps1: the screen tour
@@ -179,6 +181,9 @@ The "default" column is the mod's own value when a key is missing.
 | `cards` | d358d9e91e34870e | pixel shaders (hashes) of view-dependent effect cards |
 | `card_mode` | scissor | `scissor` clips those cards to where the game camera's view lands in each eye; `skip` leaves them out of the eyes |
 | `junction_shaders` | 1da2b9dfa4382813 | pixel shaders (hashes) of the junction screen's tint, which switches on its handling (see [status.md](status.md)) |
+| `static_surround` | 1 | the blue static between scenes on a sphere around the player, fixed in the world, splitting into bands above and below (0 = the flat screen panel, as before) |
+| `static_shaders` | f8dfae19c3a8200b | pixel shaders (hashes) of that static's noise |
+| `static_radius` | 4 | the static sphere's radius, metres |
 
 Under `[probe]` (mostly for the test copy; `tools\profile.ps1` sets them):
 

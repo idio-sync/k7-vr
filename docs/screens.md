@@ -187,6 +187,19 @@ the screen (the noise quad, the 120 scanlines) and draws that sample a frame-siz
 picture stay in the eyes, over the whole view, like fades. The 2D comparison flags this screen
 because the two runs catch different moments of the moving noise.
 
+Since 2026-11-20 (`[vr] static_surround`, design in
+docs/superpowers/specs/2026-11-20-static-surround-design.md) the static is a sphere around the
+player, fixed in the world from its first full-static frame: the full static (2D frames, which
+used to go to the screen panel) and the full-screen noise over the next scene's first frames
+fill it; as the static splits, it opens from the horizon into a band above and one below, which
+end where the game's 64-line bars end in its view (about +-24 degrees in Harman's Room). The
+same static plays going into the map, the pigeon memo and back from the pause menu, and those
+get the surround too; the TV's static channel doesn't (checked 2026-11-20). Known: in the
+first full-static frames the game shows the last picture in strips under the fading-in noise,
+and that copy is still head-locked (about a third of a second). The area card (persona
+portrait, area name in dot-matrix letters) hasn't been reproduced: capture it with F10 in the
+headset.
+
 ## subtitled cutscene
 Status: unsure
 

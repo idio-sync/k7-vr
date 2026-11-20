@@ -1,7 +1,9 @@
 #include "common.h"
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 
 namespace k7 {
@@ -55,16 +57,31 @@ void log_open() {
     logf("killer7-vr %s", K7VR_VERSION);
 }
 
+static std::string g_watch;          // `waitlog`: text a coming log line should contain
+static std::atomic<bool> g_watch_hit;
+
+void log_watch(const std::string& text) {
+    std::lock_guard lock(g_log_mx);
+    g_watch = text;
+    g_watch_hit = false;
+}
+
+bool log_watch_hit() { return g_watch_hit; }
+
 void logf(const char* fmt, ...) {
     if (!g_log) return;
-    std::lock_guard lock(g_log_mx);
-    fprintf(g_log, "[%8.3f] ", (GetTickCount64() - g_start) / 1000.0);
+    char line[2048];
     va_list args;
     va_start(args, fmt);
-    vfprintf(g_log, fmt, args);
+    vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
-    fputc('\n', g_log);
+    std::lock_guard lock(g_log_mx);
+    fprintf(g_log, "[%8.3f] %s\n", (GetTickCount64() - g_start) / 1000.0, line);
     fflush(g_log);
+    if (!g_watch.empty() && strstr(line, g_watch.c_str())) {
+        g_watch.clear();
+        g_watch_hit = true;
+    }
 }
 
 }  // namespace k7

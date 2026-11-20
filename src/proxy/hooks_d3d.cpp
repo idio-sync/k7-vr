@@ -2442,6 +2442,294 @@ static bool draw_junction_projected(bool eye_image, const ViewportScale& scale, 
     return drew;
 }
 
+// ---- The static between scenes, around the player ----
+// (docs/superpowers/specs/2026-11-20-static-surround-design.md.) After a junction or a door the
+// game fills the screen with blue noise ([vr] static_shaders: its pixel shader), a 4-vertex strip
+// over the whole 640x480 screen sampling a 640x480 noise texture through a small UV window that
+// jumps every frame. Then it splits: two such strips, one from the top edge and one from the
+// bottom, shrink towards the edges until they are bars of 64 lines each. In the eyes the noise is
+// a sphere around the player (4 m, [vr] static_radius), fixed in the world from the moment the
+// static starts: the whole sphere while it fills the screen, and as it splits, a zone above and
+// one below whose edges lie at the elevation the game's bar edges show in its view. The static
+// coming in over 3D frames (a full-screen noise over the picture in strips) stays as it was.
+static std::vector<uint64_t> g_static_ps;
+static bool g_static_on = true;          // [vr] static_surround
+static float g_static_radius_m = 4;      // [vr] static_radius
+static bool g_static_anchored;           // a transition is showing: the surround's anchor is set
+static vr::Pose g_static_anchor;         // ...where (game camera space, game units)
+static float g_static_tan[2];            // ...the game view's tangents it uses (frozen at the anchor)
+static float g_static_last_tan[2];       // the last 3D frame's game-view tangents before it
+static unsigned g_static_idle;           // frames since the last static draw
+static unsigned g_static_logged;         // static draws logged since the anchor was set
+static bool g_static_full_now;           // this frame drew the full static on the sphere (a 2D frame for the eyes)
+static bool g_static_full_shown;         // ...the last frame did (logs changes)
+static ID3D11Buffer* g_static_vb;
+constexpr UINT kStaticVbBytes = 512 * 1024;
+constexpr float kStaticCellDeg = 10;     // the sphere's cells (the noise is mapped per vertex, affinely)
+
+struct SVert {
+    float cx, cy, cw;  // this eye's clip space
+    float u, v;        // the noise texture's coordinates
+};
+
+// The bound draw as the static's noise: its zone of the sphere as elevations (radians), and the
+// noise window as an affine map from screen position to texture coordinates. False when it isn't.
+struct StaticDraw {
+    float ndc_lo, ndc_hi; // its extent's NDC y (the picture's -1..1, up)
+    bool top, bottom;     // reaches the top / bottom edge
+    bool full;            // covers the whole screen
+    float uv[6];          // u = uv[0] x + uv[1] y + uv[2], v = uv[3] x + uv[4] y + uv[5]
+    float z;
+    UINT stride;
+    uint8_t raw[64];      // the first vertex as the game wrote it (colour and any other fields)
+};
+
+static bool static_draw(StaticDraw& s) {
+    if (!g_static_on || g_static_ps.empty() || g_draw_first < 0 || g_draw_count != 4 || !ps_in(g_static_ps))
+        return false;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    if (topo != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP) return false;
+    ID3D11ShaderResourceView* srv = nullptr;
+    g_ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv) return false;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    srv->Release();
+    D3D11_RESOURCE_DIMENSION dim;
+    res->GetType(&dim);
+    D3D11_TEXTURE2D_DESC td{};
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+    res->Release();
+    if (td.Width != 640 || td.Height != 480) return false;
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return false;
+    auto mapped = g_vb_mapped.find(vb);
+    const uint8_t* base = mapped == g_vb_mapped.end() ? nullptr : mapped->second;
+    vb->Release();
+    uint8_t src[4 * 64];
+    if (!base || stride < 24 || stride > 64 ||
+        !copy_vertex_bytes(base + offset + size_t(g_draw_first) * stride, size_t(stride) * 4, src))
+        return false;
+    auto at = [&](int i) { return reinterpret_cast<const float*>(src + size_t(i) * stride); };
+    float m[4], c[2];
+    if (!ortho_map(at(0)[2], m, c)) return false;
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+    for (int i = 0; i < 4; ++i) {
+        const float nx = m[0] * at(i)[0] + m[1] * at(i)[1] + c[0], ny = m[2] * at(i)[0] + m[3] * at(i)[1] + c[1];
+        x0 = std::min(x0, nx), x1 = std::max(x1, nx), y0 = std::min(y0, ny), y1 = std::max(y1, ny);
+    }
+    if (x0 > -0.99f || x1 < 0.99f) return false;  // the full width, always
+    s.top = y1 >= 0.99f, s.bottom = y0 <= -0.99f;
+    if (!s.top && !s.bottom) return false;
+    s.full = s.top && s.bottom;
+    s.ndc_lo = y0, s.ndc_hi = y1;
+    // Texture coordinates from screen position, through three of the corners.
+    const float* a = at(0);
+    const float* b = at(1);
+    const float* d = at(2);
+    const float e1x = b[0] - a[0], e1y = b[1] - a[1], e2x = d[0] - a[0], e2y = d[1] - a[1];
+    const float det = e1x * e2y - e1y * e2x;
+    if (fabsf(det) < 1e-6f) return false;
+    for (int k = 0; k < 2; ++k) {
+        const float du1 = b[4 + k] - a[4 + k], du2 = d[4 + k] - a[4 + k];
+        const float gx = (du1 * e2y - du2 * e1y) / det, gy = (du2 * e1x - du1 * e2x) / det;
+        float* o = s.uv + k * 3;
+        o[0] = gx, o[1] = gy, o[2] = a[4 + k] - gx * a[0] - gy * a[1];
+    }
+    // The noise is a small window of its texture (spans 0.03-0.15 of it over the screen); the
+    // map's full-screen artwork, also a 640x480 texture with this shader, spans all of it.
+    if (fabsf(s.uv[0] * 640) >= 0.5f || fabsf(s.uv[4] * 480) >= 0.5f) return false;
+    // A tile spans a whole screen (y 0..480); a bar's window, extended that far, may leave the
+    // texture: slid back inside it (it is noise, so where the window sits doesn't matter).
+    const float span = s.uv[4] * 480;
+    const float lo = std::min(s.uv[5], s.uv[5] + span), hi = std::max(s.uv[5], s.uv[5] + span);
+    if (hi - lo <= 1) {
+        if (hi > 1) s.uv[5] -= hi - 1;
+        else if (lo < 0) s.uv[5] -= lo;
+    }
+    s.z = a[2];
+    s.stride = stride;
+    memcpy(s.raw, src, stride);
+    return true;
+}
+
+// Draws the bound static draw (`s`) on the sphere into both eyes with the game's own shaders,
+// texture and states. False when it can't (then it is drawn as before).
+static bool draw_static_surround(const StaticDraw& s, const ViewportScale& scale, ID3D11RenderTargetView* const* rtv,
+                                 ID3D11DepthStencilView* dsv) {
+    if (!scale.active || !scale.nvp || !g_static_anchored || g_static_tan[0] <= 0 || g_static_tan[1] <= 0) return false;
+    float m[4], c[2];
+    if (!ortho_map(s.z, m, c)) return false;
+    const float det = m[0] * m[3] - m[1] * m[2];
+    if (!g_static_vb) {
+        D3D11_BUFFER_DESC bd{kStaticVbBytes, D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+        if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_static_vb))) return false;
+    }
+    // Tiles: one game screen of noise each, the angle the screen spans in the frozen game view.
+    const float pi = 3.14159265f;
+    // (An even count, so the mirrored columns also meet without a seam behind the player.)
+    const int n_az = std::max(2, 2 * int(lroundf(pi / (2 * atanf(g_static_tan[0])))));
+    const int n_el = std::max(1, int(lroundf(pi / (2 * atanf(g_static_tan[1])))));
+    const float tw = 2 * pi / n_az, th = pi / n_el;
+    const float cell = kStaticCellDeg * pi / 180;
+    const int k_az = std::max(1, int(ceilf(tw / cell))), k_el = std::max(1, int(ceilf(th / cell)));
+    const float radius = g_static_radius_m / vr::unit();
+    const float el_hi = s.top ? pi / 2 : vr::band_elevation(s.ndc_hi, g_static_tan[1]);
+    const float el_lo = s.bottom ? -pi / 2 : vr::band_elevation(s.ndc_lo, g_static_tan[1]);
+    const UINT stride = s.stride;
+    constexpr float kNear = 1e-3f;
+
+    ID3D11Buffer* vb = nullptr;
+    UINT vb_stride = 0, vb_offset = 0;
+    g_ctx->IAGetVertexBuffers(0, 1, &vb, &vb_stride, &vb_offset);
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    g_ctx->IAGetPrimitiveTopology(&topo);
+    ID3D11ShaderResourceView* srv[kMaxTextures] = {};
+    g_ctx->PSGetShaderResources(0, kMaxTextures, srv);
+
+    const float W = float(scale.rw), H = float(scale.rh);
+    const D3D11_VIEWPORT& gvp = scale.vp[0];
+    bool drew = false;
+    std::vector<uint8_t> out;
+    out.reserve(256 * 1024);
+    for (int eye = 0; eye < 2; ++eye) {
+        ID3D11RenderTargetView* trtv[kMaxTargets] = {};
+        ID3D11DepthStencilView* tdsv = dsv;
+        bool ok = true;
+        for (UINT i = 0; i < kMaxTargets; ++i)
+            if (rtv[i] && !(trtv[i] = eye ? twin_view(rtv[i], true) : rtv[i])) ok = false;
+        if (eye && dsv && !(tdsv = twin_view(dsv, true))) ok = false;
+        if (!ok) continue;
+        const vr::EyeConsts& e = g_eyes[eye];
+        auto corner = [&](float az, float el, float tx, float ty) {
+            float p[3], clip[3];
+            vr::sphere_point(g_static_anchor, radius, az, el, p);
+            vr::point_to_eye_clip(e.head, e.px, e.py, p, clip);
+            SVert v;
+            v.cx = clip[0], v.cy = clip[1], v.cw = clip[2];
+            v.u = s.uv[0] * tx + s.uv[1] * ty + s.uv[2];
+            v.v = s.uv[3] * tx + s.uv[4] * ty + s.uv[5];
+            return v;
+        };
+        auto lerp = [](const SVert& a, const SVert& b, float t) {
+            return SVert{a.cx + (b.cx - a.cx) * t, a.cy + (b.cy - a.cy) * t, a.cw + (b.cw - a.cw) * t,
+                         a.u + (b.u - a.u) * t, a.v + (b.v - a.v) * t};
+        };
+        auto emit = [&](const SVert& sv) {
+            uint8_t v[64];
+            memcpy(v, s.raw, stride);
+            float* f = reinterpret_cast<float*>(v);
+            const float nx = sv.cx / sv.cw, ny = sv.cy / sv.cw;  // this eye's NDC (the viewport is the whole eye)
+            const float tx = nx - c[0], ty = ny - c[1];
+            f[0] = (m[3] * tx - m[1] * ty) / det;
+            f[1] = (-m[2] * tx + m[0] * ty) / det;
+            f[2] = s.z;
+            f[4] = sv.u, f[5] = sv.v;
+            out.insert(out.end(), v, v + stride);
+        };
+        auto triangle = [&](const SVert& a, const SVert& b, const SVert& d) {
+            std::vector<SVert> poly = {a, b, d}, kept;
+            for (size_t i = 0; i < poly.size(); ++i) {  // keep w >= kNear
+                const SVert& p = poly[i];
+                const SVert& q = poly[(i + 1) % poly.size()];
+                const float fp = p.cw - kNear, fq = q.cw - kNear;
+                if (fp >= 0) kept.push_back(p);
+                if ((fp >= 0) != (fq >= 0)) kept.push_back(lerp(p, q, fp / (fp - fq)));
+            }
+            if (kept.size() < 3) return;
+            bool left = true, right = true, below = true, above = true;  // wholly off one side of the eye
+            for (const SVert& p : kept) {
+                left = left && p.cx < -p.cw, right = right && p.cx > p.cw;
+                below = below && p.cy < -p.cw, above = above && p.cy > p.cw;
+            }
+            if (left || right || below || above) return;
+            for (size_t k = 1; k + 1 < kept.size(); ++k) emit(kept[0]), emit(kept[k]), emit(kept[k + 1]);
+        };
+        out.clear();
+        // Rows of tiles with one centred on the horizon (the mirror lines away from eye level);
+        // the rows at the poles are cut off there.
+        const int k_max = int(ceilf((pi / 2 - th / 2) / th));
+        for (int k = k_max; k >= -k_max - 1; --k) {
+            const float tile_top = th / 2 + k * th;
+            const int row = ((k % 2) + 2) % 2;
+            for (int j = 0; j < k_el; ++j) {
+                float el_a = tile_top - j * th / k_el, el_b = tile_top - (j + 1) * th / k_el;  // a above b
+                el_a = std::min(el_a, el_hi), el_b = std::max(el_b, el_lo);
+                if (el_a <= el_b) continue;
+                // Alternate tiles are mirrored, so neighbours meet on the same texels (no seams).
+                float ty_a = (tile_top - el_a) / th * 480, ty_b = (tile_top - el_b) / th * 480;
+                if (row % 2) ty_a = 480 - ty_a, ty_b = 480 - ty_b;
+                for (int col = 0; col < n_az; ++col) {
+                    const float tile_left = -tw / 2 + col * tw;
+                    for (int i = 0; i < k_az; ++i) {
+                        const float az_a = tile_left + i * tw / k_az, az_b = tile_left + (i + 1) * tw / k_az;
+                        float tx_a = float(i) / k_az * 640, tx_b = float(i + 1) / k_az * 640;
+                        if (col % 2) tx_a = 640 - tx_a, tx_b = 640 - tx_b;
+                        const SVert p00 = corner(az_a, el_a, tx_a, ty_a), p10 = corner(az_b, el_a, tx_b, ty_a);
+                        const SVert p01 = corner(az_a, el_b, tx_a, ty_b), p11 = corner(az_b, el_b, tx_b, ty_b);
+                        triangle(p00, p10, p11);
+                        triangle(p00, p11, p01);
+                    }
+                }
+            }
+        }
+        if (out.empty()) {
+            drew = true;  // (all of it out of this eye's view)
+            continue;
+        }
+        if (out.size() > kStaticVbBytes) continue;
+        D3D11_MAPPED_SUBRESOURCE ms;
+        if (FAILED(g_ctx->Map(g_static_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) continue;
+        memcpy(ms.pData, out.data(), out.size());
+        g_ctx->Unmap(g_static_vb, 0);
+        const UINT zero = 0;
+        g_ctx->IASetVertexBuffers(0, 1, &g_static_vb, &stride, &zero);
+        g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D11_VIEWPORT full{0, 0, W, H, gvp.MinDepth, gvp.MaxDepth};
+        const D3D11_RECT all{0, 0, LONG(scale.rw), LONG(scale.rh)};
+        g_ctx->RSSetViewports(1, &full);
+        g_ctx->RSSetScissorRects(1, &all);
+        ID3D11ShaderResourceView* use[kMaxTextures];
+        for (UINT i = 0; i < kMaxTextures; ++i) {
+            use[i] = srv[i];
+            if (eye && srv[i])
+                if (auto t = twin_view(srv[i], false)) use[i] = t;
+        }
+        g_ctx->PSSetShaderResources(0, kMaxTextures, use);
+        g_ctx->OMSetRenderTargets(kMaxTargets, trtv, tdsv);
+        g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[eye]);
+        g_ctx->Draw(UINT(out.size() / stride), 0);
+        drew = true;
+    }
+    g_ctx->IASetVertexBuffers(0, 1, &vb, &vb_stride, &vb_offset);
+    g_ctx->IASetPrimitiveTopology(topo);
+    g_ctx->PSSetShaderResources(0, kMaxTextures, srv);
+    g_ctx->VSSetConstantBuffers(kStereoSlot, 1, &g_eye_cb[0]);
+    g_ctx->OMSetRenderTargets(kMaxTargets, rtv, dsv);
+    scale.rescale();
+    for (auto t : srv)
+        if (t) t->Release();
+    if (vb) vb->Release();
+    return drew;
+}
+
+// Per frame, at the hand-off: the anchor's lifetime and the tangents it will freeze.
+static void static_surround_frame_end() {
+    if (g_static_full_now != g_static_full_shown)
+        logf("stereo: static surround %s", g_static_full_now ? "on (full static in the eyes)" : "off");
+    g_static_full_shown = g_static_full_now;
+    g_static_full_now = false;
+    if (g_static_anchored && ++g_static_idle >= 30) {
+        g_static_anchored = false;
+        logf("stereo: static surround released");
+    }
+    if (!g_static_anchored && g_frame_3d && g_gv_tan[0] > 0 && g_gv_tan[1] > 0)
+        g_static_last_tan[0] = g_gv_tan[0], g_static_last_tan[1] = g_gv_tan[1];
+}
+
 static void log_hud_draw(const char* what = "hud") {
     ID3D11PixelShader* ps = nullptr;
     g_ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -2648,6 +2936,39 @@ static void draw_stereo(DrawFn draw) {
             g_scene_vp_set = true;
         }
     }
+    // The static between scenes: on a sphere around the player (draw_static_surround). Full-screen
+    // noise over a 3D frame only once the full static has anchored the surround (the next scene's
+    // first frames, under the noise); before that it is the static coming in, left as it was.
+    if (scene && kind == 2 && g_static_on) {
+        StaticDraw sd;
+        if (static_draw(sd) && (!sd.full || !g_frame_3d || g_static_anchored)) {
+            if (!g_static_anchored) {
+                g_static_anchor = vr::surround_anchor(g_eyes[0].head, g_eyes[1].head);
+                const bool last = g_static_last_tan[0] > 0 && g_static_last_tan[1] > 0;
+                g_static_tan[0] = last ? g_static_last_tan[0] : g_gv_tan[0];
+                g_static_tan[1] = last ? g_static_last_tan[1] : g_gv_tan[1];
+                g_static_anchored = true;
+                g_static_logged = 0;
+                logf("stereo: static surround anchored (game view tangents x %.4f y %.4f)", g_static_tan[0], g_static_tan[1]);
+            }
+            g_static_idle = 0;
+            static float last_lo, last_hi;
+            static bool last_3d;
+            if (g_static_logged < 64 &&  // (per transition: the zones as the static splits, when they change)
+                (g_static_logged == 0 || sd.ndc_lo != last_lo || sd.ndc_hi != last_hi || g_frame_3d != last_3d)) {
+                ++g_static_logged;
+                last_lo = sd.ndc_lo, last_hi = sd.ndc_hi, last_3d = g_frame_3d;
+                logf("stereo: static draw frame %u %s ndc y %.3f..%.3f%s", g_frame,
+                     sd.full ? "full" : sd.top ? "top" : "bottom", sd.ndc_lo, sd.ndc_hi, g_frame_3d ? " (3D frame)" : "");
+            }
+            if (draw_static_surround(sd, scale, rtv, dsv)) {
+                if (sd.full) g_static_full_now = true;
+                draw_game_view(draw, rtv, dsv, scale);
+                release_targets();
+                return;
+            }
+        }
+    }
     const bool eye_image = scene && kind == 2 && samples_eye_image();
     if (eye_image && !g_frame_3d && g_prev_frame_3d) {
         // A screen-fixed backdrop made from last frame's image (drawn before the 3D scene, which
@@ -2829,6 +3150,12 @@ static void load_shader_list(const wchar_t* key, const wchar_t* fallback, std::v
 static void load_card_list() {
     load_shader_list(L"cards", L"d358d9e91e34870e", g_card_ps);
     load_shader_list(L"junction_shaders", L"1da2b9dfa4382813", g_junction_ps);
+    load_shader_list(L"static_shaders", L"f8dfae19c3a8200b", g_static_ps);
+    const std::wstring ini = path_in(L"k7vr.ini");
+    g_static_on = GetPrivateProfileIntW(L"vr", L"static_surround", 1, ini.c_str()) != 0;
+    wchar_t radius[32];
+    GetPrivateProfileStringW(L"vr", L"static_radius", L"", radius, 32, ini.c_str());
+    if (radius[0] && _wtof(radius) > 0.5) g_static_radius_m = float(_wtof(radius));
     wchar_t mode[16];
     GetPrivateProfileStringW(L"vr", L"card_mode", L"scissor", mode, 16, path_in(L"k7vr.ini").c_str());
     g_card_skip = _wcsicmp(mode, L"skip") == 0;
@@ -3567,7 +3894,7 @@ static void end_frame(IDXGISwapChain* sc) {
         }
         if (menu) {
             screen = menu;
-        } else if (g_frame_3d && g_final[0]) {
+        } else if ((g_frame_3d || g_static_full_now) && g_final[0]) {  // (the full static: in the eyes, no HUD)
             left = g_final[0];
             right = g_final[1] ? g_final[1] : g_final[0];
         } else {
@@ -3663,6 +3990,7 @@ static void end_frame(IDXGISwapChain* sc) {
         if (g_junction_now != g_junction_shown) logf("stereo: junction screen %s", g_junction_now ? "on" : "off");
         g_junction_shown = g_junction_now;
         g_junction_now = false;
+        static_surround_frame_end();
         g_prev_frame_3d = g_frame_3d;
         g_frame_3d = false;
         g_scene_vp_set = false;

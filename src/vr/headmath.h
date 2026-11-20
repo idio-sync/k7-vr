@@ -70,4 +70,22 @@ void game_ndc_to_eye_clip(const float head[12], const float px[4], const float p
 // projection (4x4, row-major), clipped to NDC.
 float ortho_cover(const float* xy, int count, const float mv0[12], const float proj[16]);
 
+// ---- The static between scenes, around the player (hooks_d3d.cpp, "static surround") ----
+
+// Elevation (radians, up > 0) of a horizontal line of the game's picture at NDC y `ndc_y` (-1..1,
+// up), seen from the game camera whose vertical half-angle tangent is `tan_y`.
+float band_elevation(float ndc_y, float tan_y);
+
+// Where the surround is anchored, from both eyes' shader transforms (eye_space_transform, game
+// units): between the eyes, facing the left eye's yaw, level. A pose in the game camera's space.
+Pose surround_anchor(const float head0[12], const float head1[12]);
+
+// The point at azimuth `az` (radians, right > 0 from the anchor's front, -z) and elevation `el`
+// (up > 0) on a sphere of radius `radius` (game units) around the anchor.
+void sphere_point(const Pose& anchor, float radius, float az, float el, float out[3]);
+
+// A point of the game camera's space (game units) in an eye's clip space: out = clip x, clip y,
+// w (w <= 0: at or behind the eye plane). `head` from eye_space_transform, px/py its projection.
+void point_to_eye_clip(const float head[12], const float px[4], const float py[4], const float p[3], float out[3]);
+
 }  // namespace k7::vr

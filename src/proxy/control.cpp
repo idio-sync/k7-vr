@@ -14,6 +14,8 @@
 //   expect 3d|menu|2d|any [ms]  check the next ms (default 1000) of frames as the headset gets them,
 //                           while the following steps run; logs "expect ...: pass" or "FAIL ..."
 //   mark text               log line when the step's turn comes (tools\check.ps1 waits on these)
+//   waitlog [ms] text       wait until a log line containing text is written (default at most
+//                           60000 ms; logs "waitlog: timed out" if it isn't)
 //   screen name             "screen: name" in the log and a pair (stereo) or screenshot (flat), for
 //                           the screen catalogue (tools\check.ps1, tools\catalog.py)
 //   sweep                   look around (stereo): 8 head directions and straight ahead again, each
@@ -72,6 +74,7 @@ struct Step {
     bool view = false;
     float yaw = 0, pitch = 0;
     std::function<void()> action;  // run when the step starts (memory commands)
+    bool watch = false;            // `waitlog`: also ends when the watched log line comes
 };
 
 static std::mutex g_mx;
@@ -337,6 +340,21 @@ static void run_line(const std::string& line) {
             return;
         }
         g_steps.push_back(Step{.action = [=] { request_expect(kind, ms); }});
+    } else if (cmd == "waitlog") {  // until a log line contains the text (after this step starts)
+        DWORD ms = 60000;
+        std::string rest;
+        std::getline(ss, rest);
+        const size_t start = rest.find_first_not_of(' ');
+        rest = start == std::string::npos ? "" : rest.substr(start);
+        if (rest.size() > 2 && isdigit(uint8_t(rest[0]))) {  // an optional timeout first
+            ms = DWORD(strtoul(rest.c_str(), nullptr, 10));
+            rest = rest.substr(std::min(rest.size(), rest.find(' ') + 1));
+        }
+        if (rest.empty()) {
+            logf("cmd: waitlog wants [ms] text");
+            return;
+        }
+        g_steps.push_back(Step{.ms = ms, .action = [=] { log_watch(rest); }, .watch = true});
     } else if (cmd == "mark") {  // a log line when this step's turn comes (`log` writes at once)
         std::string rest;
         std::getline(ss, rest);
@@ -421,7 +439,8 @@ static void run_line(const std::string& line) {
 // Advances the step queue; called every frame (and from the pad hook, whichever comes first).
 static void advance_locked() {
     ULONGLONG now = GetTickCount64();
-    if (g_running && now >= g_cur_end) {
+    if (g_running && (now >= g_cur_end || (g_cur.watch && log_watch_hit()))) {
+        if (g_cur.watch && !log_watch_hit()) logf("waitlog: timed out");
         if (g_cur.vk) post_key(g_cur.vk, false);
         if (g_cur.mouse) post_mouse(g_cur.mouse == 1 ? RI_MOUSE_LEFT_BUTTON_UP : RI_MOUSE_RIGHT_BUTTON_UP, 0, 0);
         g_running = false;

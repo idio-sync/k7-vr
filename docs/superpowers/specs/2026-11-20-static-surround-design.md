@@ -1,6 +1,7 @@
 # The static between scenes, all around the player
 
-Date: 2026-11-20. Status: draft for the user's approval.
+Date: 2026-11-20. Status: approved by the user 2026-11-20; built the same day (see "As built"
+at the end). The area card part is still waiting on a capture.
 
 ## Why
 
@@ -183,3 +184,23 @@ is planned. If a headset check shows SteamVR's loading view during a real load, 
   vertices carry the draw's colour/extra fields (copy from the game's vertex as the junction
   code does), and where the code lives (a new file `src/proxy/static_surround.cpp` beside
   hooks_d3d.cpp is preferred; hooks_d3d.cpp is already 3,900 lines).
+
+## As built (2026-11-20)
+- The code is in `src/proxy/hooks_d3d.cpp` ("The static between scenes, around the player",
+  `static_draw`, `draw_static_surround`, `static_surround_frame_end`), next to the junction code
+  it reuses (vertex access, the ortho map, twins), not a file of its own. The math
+  (`band_elevation`, `surround_anchor`, `sphere_point`, `point_to_eye_clip`) is in
+  `src/vr/headmath.cpp` with unit tests.
+- Changed from the design: full-screen noise over a 3D frame also goes on the sphere once the
+  surround is anchored. On the opening's route the next scene (a cutscene) starts under the
+  full noise, and the old routing clipped it to the letterbox band, a head-locked rectangle.
+- Tiles alternate mirrored (and there is an even number of columns), so neighbouring tiles meet
+  on the same texels: the tiles' seams read as lines otherwise.
+- The shader (`f8dfae19c3a8200b`) is a general textured 2D shader (HUD pieces use it too); the
+  640x480 texture, the full-width extent and touching the top or bottom edge are what pick out
+  the static. The same static plays going into the map, the pigeon memo and out of the pause
+  menu; those get the surround too. The TV's static channel doesn't match.
+- Two boot-time statics come before any 3D frame (no game-view tangents to freeze); they stay on
+  the screen panel as before.
+- The harness gained `waitlog [ms] TEXT` (wait for a log line), and the log names each static
+  draw's zone as it changes (`stereo: static draw frame N top|bottom|full ndc y ...`).

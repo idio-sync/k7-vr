@@ -186,4 +186,33 @@ float ortho_cover(const float* xy, int count, const float mv0[12], const float p
     return w * h / 4;
 }
 
+float band_elevation(float ndc_y, float tan_y) { return atanf(ndc_y * tan_y); }
+
+Pose surround_anchor(const float head0[12], const float head1[12]) {
+    auto eye_pose = [](const float h[12]) {  // the eye in the game camera's space (game units)
+        Pose p;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 4; ++j) p.m[i][j] = h[i * 4 + j];
+        return inverse(p);
+    };
+    const Pose e0 = eye_pose(head0), e1 = eye_pose(head1);
+    Pose a = yaw_only(e0);
+    for (int i = 0; i < 3; ++i) a.m[i][3] = (e0.m[i][3] + e1.m[i][3]) / 2;
+    return a;
+}
+
+void sphere_point(const Pose& anchor, float radius, float az, float el, float out[3]) {
+    const float d[3] = {radius * sinf(az) * cosf(el), radius * sinf(el), -radius * cosf(az) * cosf(el)};
+    for (int i = 0; i < 3; ++i)
+        out[i] = anchor.m[i][0] * d[0] + anchor.m[i][1] * d[1] + anchor.m[i][2] * d[2] + anchor.m[i][3];
+}
+
+void point_to_eye_clip(const float head[12], const float px[4], const float py[4], const float p[3], float out[3]) {
+    float e[3];
+    for (int i = 0; i < 3; ++i) e[i] = head[i * 4] * p[0] + head[i * 4 + 1] * p[1] + head[i * 4 + 2] * p[2] + head[i * 4 + 3];
+    out[0] = px[0] * e[0] + px[1] * e[1] + px[2] * e[2] + px[3];
+    out[1] = py[0] * e[0] + py[1] * e[1] + py[2] * e[2] + py[3];
+    out[2] = -e[2];
+}
+
 }  // namespace k7::vr

@@ -23,6 +23,9 @@ void install_crash_log();
 void log_exit(bool process_exit);
 void crash_test();  // the `crashtest` command: crashes the game on purpose
 void logf(const char* fmt, ...);
+// `waitlog`: watch for the next log line containing `text` (log_watch_hit turns true once).
+void log_watch(const std::string& text);
+bool log_watch_hit();
 
 // Import and vtable patching.
 bool patch_import(HMODULE module, const char* dll, const char* func, void* hook, void** orig);
